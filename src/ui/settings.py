@@ -281,12 +281,38 @@ def main(page: ft.Page) -> None:
         **section_style,
     )
 
+    tabs = ft.Tabs(
+        length=3,
+        selected_index=0,
+        animation_duration=200,
+        expand=True,
+        content=ft.Column(
+            [
+                ft.TabBar(
+                    tabs=[
+                        ft.Tab(label="Geral", icon=ft.Icons.TUNE),
+                        ft.Tab(label="Atalhos", icon=ft.Icons.KEYBOARD),
+                        ft.Tab(label="HUD", icon=ft.Icons.VISIBILITY),
+                    ],
+                ),
+                ft.TabBarView(
+                    expand=True,
+                    controls=[
+                        ft.Column([general_card], scroll=ft.ScrollMode.AUTO, expand=True),
+                        ft.Column([hotkeys_card], scroll=ft.ScrollMode.AUTO, expand=True),
+                        ft.Column([triggers_card], scroll=ft.ScrollMode.AUTO, expand=True),
+                    ],
+                ),
+            ],
+            expand=True,
+            spacing=10,
+        ),
+    )
+
     page.add(
         ft.Column(
             [
-                general_card,
-                hotkeys_card,
-                triggers_card,
+                tabs,
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.CLOUD_DONE, size=16, color=ft.Colors.GREEN_300),
@@ -295,9 +321,8 @@ def main(page: ft.Page) -> None:
                     spacing=8,
                 ),
             ],
-            spacing=14,
+            spacing=12,
             expand=True,
-            scroll=ft.ScrollMode.AUTO,
         )
     )
 
