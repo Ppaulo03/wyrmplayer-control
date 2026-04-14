@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from typing import Optional, Set
 
@@ -12,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class MusicWebSocketServer:
-    """Gerencia o servidor WebSocket e a comunicação com a extensão."""
+    """Gerencia o servidor WebSocket e a comunicação de texto simples com a extensão."""
 
     def __init__(self, state: AppState, host: str = "127.0.0.1", port: int = 8975) -> None:
         self.state = state
@@ -30,7 +29,7 @@ class MusicWebSocketServer:
             await self._broadcast_loop()
 
     async def handler(self, websocket: ServerConnection) -> None:
-        """Handler para conexões de entrada."""
+        """Handler para conexões de entrada (Protocolo de Texto Simples)."""
         self.clients.add(websocket)
         self.state.active_connections = len(self.clients)
         logger.info(f"Extensão conectada! (Conexões ativas: {self.state.active_connections})")
@@ -47,40 +46,77 @@ class MusicWebSocketServer:
             logger.info(f"Extensão desconectada. (Conexões ativas: {self.state.active_connections})")
 
     def _parse_message(self, message: str) -> None:
-        """Processa as mensagens JSON recebidas da extensão."""
+        """
+        Processa as mensagens de texto simples recebidas da extensão.
+        Formato esperado: "CHAVE:VALOR" (ex: "TITLE:Paradise")
+        """
+        if ":" not in message:
+            return
+
         try:
-            data = json.loads(message)
-            status_code = data.get("playerStatus")
-            status_text = (
-                "Tocando" if status_code == 1 else "Pausado" if status_code == 2 else "Desconhecido"
+            key, value = message.split(":", 1)
+            key = key.upper().strip()
+            value = value.strip()
+
+            # Como as mensagens chegam um campo por vez, precisamos preservar o estado dos outros campos
+            current = self.state.metadata
+            title, artist, album, cover, status, volume = (
+                current.title,
+                current.artist,
+                current.album,
+                current.cover,
+                current.status,
+                current.volume,
             )
 
-            raw_vol = data.get("volume", self.state.metadata.volume)
-            volume = int(raw_vol if raw_vol > 1 else raw_vol * 100)
+            updated = False
 
-            new_metadata = MediaMetadata(
-                title=data.get("title", self.state.metadata.title),
-                artist=data.get("artist", self.state.metadata.artist),
-                album=data.get("album", self.state.metadata.album),
-                cover=data.get("cover", self.state.metadata.cover),
-                status=status_text,
-                volume=volume,
-            )
+            if key == "TITLE":
+                title = value
+                updated = True
+            elif key == "ARTIST":
+                artist = value
+                updated = True
+            elif key == "ALBUM":
+                album = value
+                updated = True
+            elif key == "COVER":
+                cover = value
+                updated = True
+            elif key == "STATE":
+                # 1 = Tocando, 2 = Pausado (Padrão WNP Redux para texto)
+                status = "Tocando" if value == "1" else "Pausado"
+                updated = True
+            elif key == "VOLUME":
+                try:
+                    volume = int(value)
+                    updated = True
+                except ValueError:
+                    pass
 
-            if new_metadata != self.state.metadata:
-                self.state.metadata = new_metadata
-                # Sincroniza estado de mute com o volume real
-                if self.state.metadata.volume == 0:
-                    self.state.is_muted = True
-                elif self.state.metadata.volume > 0 and self.state.is_muted:
-                    self.state.is_muted = False
-
-                logger.info(
-                    f"META: {self.state.metadata.title} - {self.state.metadata.artist} "
-                    f"({self.state.metadata.status}) | Vol: {self.state.metadata.volume}%"
+            if updated:
+                new_metadata = MediaMetadata(
+                    title=title,
+                    artist=artist,
+                    album=album,
+                    cover=cover,
+                    status=status,
+                    volume=volume,
                 )
-        except json.JSONDecodeError:
-            pass
+
+                if new_metadata != self.state.metadata:
+                    self.state.metadata = new_metadata
+                    # Sincroniza estado de mute com o volume real recebido
+                    if volume == 0:
+                        self.state.is_muted = True
+                    elif volume > 0 and self.state.is_muted:
+                        self.state.is_muted = False
+
+                    logger.info(
+                        f"META: {title} - {artist} ({status}) | Vol: {volume}%"
+                    )
+        except Exception as e:
+            logger.error(f"Erro ao processar mensagem '{message}': {e}")
 
     async def _broadcast_loop(self) -> None:
         """Envia comandos da fila para todos os clientes conectados."""

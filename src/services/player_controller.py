@@ -39,9 +39,11 @@ class PlayerController:
             logger.info(f"mute desativado (Volume restaurado: {self.state.last_non_zero_volume}%)")
 
     def adjust_volume(self, delta: int) -> None:
-        """Ajusta o volume e desmuta se necessário."""
+        """Ajusta o volume usando valor absoluto para evitar bugs com comandos relativos."""
         if self.state.is_muted:
             self.toggle_mute()
 
-        cmd = f"setVolume {'+' if delta > 0 else ''}{delta}"
+        new_volume = self.state.metadata.volume + delta
+        new_volume = max(0, min(100, new_volume))
+        cmd = f"setVolume {new_volume}"
         self.server.enqueue_command(cmd)
