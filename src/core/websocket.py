@@ -137,10 +137,14 @@ class MusicWebSocketServer:
                     self.state.metadata = new_metadata
                     
                     if key == "VOLUME":
-                        if volume == 0:
-                            self.state.is_muted = True
-                        elif volume > 0 and self.state.is_muted:
-                            self.state.is_muted = False
+                        # Sempre atualiza a memória do último volume ativo se for > 0
+                        if volume > 0:
+                            self.state.last_non_zero_volume = volume
+                            # Se o volume subiu externamente, assume que não está mais em "Mute"
+                            if self.state.is_muted:
+                                self.state.is_muted = False
+                        # NOTA: Não setamos is_muted=True automaticamente para volume=0.
+                        # Isso permite diferenciar o "zero manual" do "Mute" controlado pelo app.
 
                     # Notifica observadores
                     if self._loop:

@@ -36,12 +36,15 @@ class PlayerController:
     def toggle_mute(self) -> None:
         """Alterna o estado de mute salvando o volume anterior."""
         if not self.state.is_muted:
+            # Muta: salva volume se for maior que 0 e zera no player
             if self.state.metadata.volume > 0:
                 self.state.last_non_zero_volume = self.state.metadata.volume
+            
             self.server.enqueue_command("setVolume 0")
             self.state.is_muted = True
             logger.info(f"mute ativado (Volume salvo: {self.state.last_non_zero_volume}%)")
         else:
+            # Desmuta: restaura o último volume conhecido
             self.server.enqueue_command(f"setVolume {self.state.last_non_zero_volume}")
             self.state.is_muted = False
             logger.info(f"mute desativado (Volume restaurado: {self.state.last_non_zero_volume}%)")
@@ -49,12 +52,16 @@ class PlayerController:
         self._notify_ui()
 
     def adjust_volume(self, delta: int) -> None:
-        """Ajusta o volume usando valor absoluto para evitar bugs com comandos relativos."""
+        """Ajusta o volume de forma inteligente, lidando com o estado de mute sem duplicar comandos."""
         if self.state.is_muted:
-            self.toggle_mute()
+            # Se estava mudo, o ajuste parte do último volume não-zero
+            base_volume = self.state.last_non_zero_volume
+            self.state.is_muted = False
+        else:
+            base_volume = self.state.metadata.volume
 
-        new_volume = self.state.metadata.volume + delta
-        new_volume = max(0, min(100, new_volume))
-        cmd = f"setVolume {new_volume}"
-        self.server.enqueue_command(cmd)
+        new_volume = max(0, min(100, base_volume + delta))
+        
+        # Envia apenas UM comando definitivo para evitar "pulos" de volume
+        self.server.enqueue_command(f"setVolume {new_volume}")
         self._notify_ui()
