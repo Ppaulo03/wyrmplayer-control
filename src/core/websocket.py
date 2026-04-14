@@ -45,6 +45,18 @@ class MusicWebSocketServer:
             self.state.active_connections = len(self.clients)
             logger.info(f"Extensão desconectada. (Conexões ativas: {self.state.active_connections})")
 
+    def _time_to_seconds(self, time_str: str) -> int:
+        """Converte formato MM:SS ou HH:MM:SS para segundos."""
+        try:
+            parts = list(map(int, time_str.split(":")))
+            if len(parts) == 2:
+                return parts[0] * 60 + parts[1]
+            elif len(parts) == 3:
+                return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        except Exception:
+            pass
+        return 0
+
     def _parse_message(self, message: str) -> None:
         """
         Processa as mensagens de texto simples recebidas da extensão.
@@ -58,25 +70,28 @@ class MusicWebSocketServer:
             key = key.upper().strip()
             value = value.strip()
 
-            # Como as mensagens chegam um campo por vez, precisamos preservar o estado dos outros campos
             current = self.state.metadata
-            title, artist, album, cover, status, volume = (
+            title, artist, album, cover, status, volume, duration, position, progress = (
                 current.title,
                 current.artist,
                 current.album,
                 current.cover,
                 current.status,
                 current.volume,
+                current.duration,
+                current.position,
+                current.progress,
             )
 
             updated = False
+            log_meta = False
 
             if key == "TITLE":
                 title = value
-                updated = True
+                updated = log_meta = True
             elif key == "ARTIST":
                 artist = value
-                updated = True
+                updated = log_meta = True
             elif key == "ALBUM":
                 album = value
                 updated = True
@@ -84,15 +99,26 @@ class MusicWebSocketServer:
                 cover = value
                 updated = True
             elif key == "STATE":
-                # 1 = Tocando, 2 = Pausado (Padrão WNP Redux para texto)
                 status = "Tocando" if value == "1" else "Pausado"
-                updated = True
+                updated = log_meta = True
             elif key == "VOLUME":
                 try:
                     volume = int(value)
-                    updated = True
+                    updated = log_meta = True
                 except ValueError:
                     pass
+            elif key == "DURATION":
+                duration = value
+                d_sec = self._time_to_seconds(duration)
+                p_sec = self._time_to_seconds(position)
+                progress = p_sec / d_sec if d_sec > 0 else 0.0
+                updated = True
+            elif key == "POSITION":
+                position = value
+                d_sec = self._time_to_seconds(duration)
+                p_sec = self._time_to_seconds(position)
+                progress = min(1.0, p_sec / d_sec) if d_sec > 0 else 0.0
+                updated = True
 
             if updated:
                 new_metadata = MediaMetadata(
@@ -102,19 +128,24 @@ class MusicWebSocketServer:
                     cover=cover,
                     status=status,
                     volume=volume,
+                    duration=duration,
+                    position=position,
+                    progress=progress,
                 )
 
                 if new_metadata != self.state.metadata:
                     self.state.metadata = new_metadata
-                    # Sincroniza estado de mute com o volume real recebido
-                    if volume == 0:
-                        self.state.is_muted = True
-                    elif volume > 0 and self.state.is_muted:
-                        self.state.is_muted = False
+                    
+                    if key == "VOLUME":
+                        if volume == 0:
+                            self.state.is_muted = True
+                        elif volume > 0 and self.state.is_muted:
+                            self.state.is_muted = False
 
-                    logger.info(
-                        f"META: {title} - {artist} ({status}) | Vol: {volume}%"
-                    )
+                    # Notifica observadores
+                    if self._loop:
+                        self._loop.create_task(self.state.notify())
+
         except Exception as e:
             logger.error(f"Erro ao processar mensagem '{message}': {e}")
 
@@ -130,6 +161,7 @@ class MusicWebSocketServer:
                     except Exception as e:
                         logger.error(f"Erro ao enviar {command}: {e}")
             self.command_queue.task_done()
+
 
     def enqueue_command(self, command: str) -> None:
         """Adiciona um comando à fila de forma thread-safe."""

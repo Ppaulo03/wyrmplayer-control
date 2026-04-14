@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from src.core.state import AppState
@@ -12,6 +13,13 @@ class PlayerController:
     def __init__(self, state: AppState, server: MusicWebSocketServer) -> None:
         self.state = state
         self.server = server
+
+    def _notify_ui(self) -> None:
+        """Notifica a UI de forma segura entre threads."""
+        if self.server._loop:
+            self.server._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self.state.notify())
+            )
 
     def play_pause(self) -> None:
         """Alterna entre reprodução e pausa."""
@@ -37,6 +45,8 @@ class PlayerController:
             self.server.enqueue_command(f"setVolume {self.state.last_non_zero_volume}")
             self.state.is_muted = False
             logger.info(f"mute desativado (Volume restaurado: {self.state.last_non_zero_volume}%)")
+        
+        self._notify_ui()
 
     def adjust_volume(self, delta: int) -> None:
         """Ajusta o volume usando valor absoluto para evitar bugs com comandos relativos."""
@@ -47,3 +57,4 @@ class PlayerController:
         new_volume = max(0, min(100, new_volume))
         cmd = f"setVolume {new_volume}"
         self.server.enqueue_command(cmd)
+        self._notify_ui()
