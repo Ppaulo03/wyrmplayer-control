@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('src', 'src')]
+datas = [('src', 'src'), ('assets', 'assets')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('flet')
@@ -43,4 +43,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     uac_admin=True,
+    icon='assets/icon.ico',
 )

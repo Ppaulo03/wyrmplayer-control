@@ -1,10 +1,22 @@
+import os
+import sys
+from pathlib import Path
+
 import flet as ft
 from src.core.display import HUD_POSITION_PRESETS, list_monitors
 from src.core.config import ConfigManager, AppConfig
 
 
 def main(page: ft.Page) -> None:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base_dir = Path(getattr(sys, "_MEIPASS"))
+    else:
+        base_dir = Path(__file__).resolve().parents[2]
+
+    settings_icon = str(base_dir / os.path.join("assets", "icon.ico"))
+
     page.title = "Configurações - Music HUD"
+    page.window.icon = settings_icon
     page.window.width = 540
     page.window.height = 720
     page.window.min_width = 460

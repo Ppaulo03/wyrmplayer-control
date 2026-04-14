@@ -1,7 +1,9 @@
 import logging
+import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import pystray
@@ -22,7 +24,7 @@ class SystemTrayManager:
         self.on_exit_callback = on_exit_callback
         self.on_open_settings = on_open_settings
         self.on_reload_hotkeys = on_reload_hotkeys
-        self.icon: Optional[pystray.Icon] = None
+        self.icon: Optional[Any] = None
 
     def _open_settings(self) -> None:
         """Abre a tela de configurações em um processo separado."""
@@ -62,6 +64,23 @@ class SystemTrayManager:
         
         return image
 
+    def _resolve_asset_path(self, relative_path: str) -> Path:
+        """Resolve paths both in source mode and PyInstaller frozen mode."""
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            base_dir = Path(getattr(sys, "_MEIPASS"))
+        else:
+            base_dir = Path(__file__).resolve().parents[2]
+        return base_dir / relative_path
+
+    def _load_tray_icon(self) -> Image.Image:
+        """Load tray icon from assets, fallback to generated placeholder."""
+        icon_path = self._resolve_asset_path(os.path.join("assets", "icon.png"))
+        try:
+            return Image.open(icon_path)
+        except Exception as e:
+            logger.warning(f"Nao foi possivel carregar icone da tray em {icon_path}: {e}")
+            return self._create_placeholder_icon()
+
     def _run_icon(self) -> None:
         """Executa o ícone da bandeja (bloqueante na thread)."""
         menu = pystray.Menu(
@@ -73,14 +92,14 @@ class SystemTrayManager:
         )
         
         self.icon = pystray.Icon(
-            "music_controller",
-            self._create_placeholder_icon(),
-            title="Music Controller",
+            "wyrmplayer_controller",
+            self._load_tray_icon(),
+            title="WyrmPlayer Controller",
             menu=menu,
         )
         self.icon.run()
 
-    def _on_exit_click(self, icon: pystray.Icon, item: Any) -> None:
+    def _on_exit_click(self, icon: Any, item: Any) -> None:
         """Chamado quando o usuário clica em Sair."""
         logger.info("Solicitação de saída via System Tray.")
         if self.icon:
