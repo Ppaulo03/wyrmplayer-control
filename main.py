@@ -1,6 +1,7 @@
 import asyncio
 import ctypes
 import logging
+import os
 import sys
 
 import flet as ft
@@ -19,6 +20,44 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+
+async def watch_config_changes(hotkeys: HotkeyManager, state: AppState, exit_event: asyncio.Event) -> None:
+    """Observa settings.json e recarrega atalhos automaticamente quando houver mudança."""
+    settings_path = "settings.json"
+    last_mtime: float | None = None
+    last_hotkeys = state.config.load().hotkeys.copy()
+
+    if os.path.exists(settings_path):
+        try:
+            last_mtime = os.path.getmtime(settings_path)
+        except OSError:
+            last_mtime = None
+
+    while not exit_event.is_set():
+        await asyncio.sleep(0.4)
+
+        if not os.path.exists(settings_path):
+            continue
+
+        try:
+            current_mtime = os.path.getmtime(settings_path)
+        except OSError:
+            continue
+
+        if last_mtime is not None and current_mtime <= last_mtime:
+            continue
+
+        last_mtime = current_mtime
+
+        try:
+            cfg = state.config.load()
+            if cfg.hotkeys != last_hotkeys:
+                hotkeys.setup()
+                last_hotkeys = cfg.hotkeys.copy()
+                logger.info("Config alterada: hotkeys recarregadas automaticamente.")
+        except Exception as e:
+            logger.error(f"Falha ao recarregar configuração dinâmica: {e}")
 
 
 async def app_main(page: ft.Page) -> None:
@@ -64,6 +103,7 @@ async def app_main(page: ft.Page) -> None:
     # 6. Inicia o servidor WebSocket
     logger.info("Iniciando Servidor WebSocket em background...")
     server_task = asyncio.create_task(server.start())
+    config_watch_task = asyncio.create_task(watch_config_changes(hotkeys, state, exit_event))
 
 
     # Aguarda o sinal de saída do Tray ou cancelamento
@@ -74,6 +114,7 @@ async def app_main(page: ft.Page) -> None:
         pass
     finally:
         server_task.cancel()
+        config_watch_task.cancel()
         logger.info("Controlador encerrado com sucesso.")
         sys.exit(0)
 
