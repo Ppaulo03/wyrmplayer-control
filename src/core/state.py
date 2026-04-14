@@ -27,19 +27,19 @@ class AppState:
     active_connections: int = 0
 
     # Lista de callbacks assíncronos para notificar mudanças (ex: para a UI)
-    _listeners: List[Callable[[], Coroutine[Any, Any, None]]] = field(
+    _listeners: List[Callable[[bool], Coroutine[Any, Any, None]]] = field(
         default_factory=list, repr=False
     )
 
-    def on_update(self, callback: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    def on_update(self, callback: Callable[[bool], Coroutine[Any, Any, None]]) -> None:
         """Registra um observador para mudanças de estado."""
         self._listeners.append(callback)
 
-    async def notify(self) -> None:
-        """Notifica todos os observadores registrados."""
+    async def notify(self, major: bool = False) -> None:
+        """Notifica os observadores. 'major' indica se a mudança deve despertar a UI."""
         for callback in self._listeners:
             try:
-                await callback()
+                await callback(major)
             except Exception:
-                # Evita que um erro em um listener quebre o fluxo principal
                 pass
+

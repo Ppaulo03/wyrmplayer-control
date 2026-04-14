@@ -146,9 +146,14 @@ class MusicWebSocketServer:
                         # NOTA: Não setamos is_muted=True automaticamente para volume=0.
                         # Isso permite diferenciar o "zero manual" do "Mute" controlado pelo app.
 
-                    # Notifica observadores
+                    # Notifica observadores com a flag de importância
                     if self._loop:
-                        self._loop.create_task(self.state.notify())
+                        self._loop.create_task(self.state.notify(major=log_meta))
+
+                    if log_meta:
+                        logger.info(
+                            f"META: {title} - {artist} ({status}) | Vol: {volume}%"
+                        )
 
         except Exception as e:
             logger.error(f"Erro ao processar mensagem '{message}': {e}")

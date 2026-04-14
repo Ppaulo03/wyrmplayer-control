@@ -173,8 +173,8 @@ class MusicHUD:
         await asyncio.sleep(0.5)
         self._force_window_stealth()
 
-    async def update_ui(self) -> None:
-        """Sincroniza UI."""
+    async def update_ui(self, major: bool = False) -> None:
+        """Sincroniza UI. Se major for True, desperta a visibilidade do HUD."""
         if not self.page:
             return
 
@@ -187,15 +187,20 @@ class MusicHUD:
         self.status_icon.name = ft.Icons.PLAY_ARROW if is_playing else ft.Icons.PAUSE
         self.status_icon.color = ft.Colors.AMBER if is_playing else ft.Colors.WHITE54
 
-        # Atualiza Tempo e Progresso
-        self.track_progress_bar.value = self.state.metadata.progress
+        # Atualiza Tempo e Progresso (Atualização silenciosa)
+        self.track_progress_bar.value = self.state.metadata.progress or 0.0
         self.time_text.value = f"{self.state.metadata.position} / {self.state.metadata.duration}"
         
         # Atualiza Volume
         self.volume_indicator.controls[1].value = f"{self.state.metadata.volume}%"
         self.volume_indicator.controls[0].color = ft.Colors.RED if self.state.is_muted else ft.Colors.WHITE54
 
-        await self.show_hud()
+        # Apenas mostra o HUD (resetando o timer) se for uma mudança importante
+        if major:
+            await self.show_hud()
+        else:
+            self.page.update()
+
 
     async def show_hud(self) -> None:
         """Exibe o HUD."""
