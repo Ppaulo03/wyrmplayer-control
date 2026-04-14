@@ -14,14 +14,14 @@ class HotkeyManager:
         self.controller = controller
 
     def setup(self) -> None:
-        """Registra os atalhos padrões do sistema."""
+        """Registra os atalhos padrões do sistema usando Alt Gr."""
         hotkey_map = {
-            "alt+shift+p": self.controller.play_pause,
-            "alt+shift+right": self.controller.next_track,
-            "alt+shift+left": self.controller.previous_track,
-            "alt+shift+up": lambda: self.controller.adjust_volume(5),
-            "alt+shift+down": lambda: self.controller.adjust_volume(-5),
-            "alt+shift+m": self.controller.toggle_mute,
+            "alt gr+p": self.controller.play_pause,
+            "alt gr+right": self.controller.next_track,
+            "alt gr+left": self.controller.previous_track,
+            "alt gr+up": lambda: self.controller.adjust_volume(5),
+            "alt gr+down": lambda: self.controller.adjust_volume(-5),
+            "alt gr+m": self.controller.toggle_mute,
         }
 
         for hk, callback in hotkey_map.items():
