@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import tempfile
+from typing import Awaitable, Callable
 
 import flet as ft
 
@@ -80,6 +81,7 @@ async def watch_config_changes(
     hud: MusicHUD,
     state: AppState,
     exit_event: asyncio.Event,
+    on_websocket_port_change: Callable[[int], Awaitable[None]],
 ) -> None:
     """Observa settings.json e recarrega atalhos automaticamente quando houver mudança."""
     settings_path = "settings.json"
@@ -91,6 +93,7 @@ async def watch_config_changes(
     )
     last_log_level = state.config.load().log_level
     last_log_file = state.config.load().log_file
+    last_websocket_port = state.config.load().websocket_port
 
     if os.path.exists(settings_path):
         try:
@@ -129,6 +132,13 @@ async def watch_config_changes(
                     cfg.log_level,
                     log_file_path,
                 )
+            if cfg.websocket_port != last_websocket_port:
+                last_websocket_port = cfg.websocket_port
+                logger.info(
+                    "Config alterada: porta do WebSocket atualizada para %s.",
+                    cfg.websocket_port,
+                )
+                await on_websocket_port_change(cfg.websocket_port)
             current_hud_layout = (cfg.hud_monitor, cfg.hud_position)
             if current_hud_layout != last_hud_layout:
                 last_hud_layout = current_hud_layout
@@ -155,6 +165,25 @@ async def app_main(page: ft.Page) -> None:
 
     # 2. Inicializa a lógica de controle do player
     controller = PlayerController(state, server)
+
+    server_task: asyncio.Task[None] | None = None
+
+    async def restart_websocket_server(new_port: int) -> None:
+        nonlocal server, server_task
+
+        logger.info("Reiniciando servidor WebSocket na porta %s...", new_port)
+        if server_task is not None:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("Falha ao encerrar WebSocket anterior: %s", e)
+
+        server = MusicWebSocketServer(state, port=new_port)
+        controller.set_server(server)
+        server_task = asyncio.create_task(server.start())
 
     # 3. Configura o gerenciador de atalhos globais
     hotkeys = HotkeyManager(controller)
@@ -184,7 +213,13 @@ async def app_main(page: ft.Page) -> None:
     logger.info("Iniciando Servidor WebSocket em background...")
     server_task = asyncio.create_task(server.start())
     config_watch_task = asyncio.create_task(
-        watch_config_changes(hotkeys, hud, state, exit_event)
+        watch_config_changes(
+            hotkeys,
+            hud,
+            state,
+            exit_event,
+            restart_websocket_server,
+        )
     )
 
     # Aguarda o sinal de saída do Tray ou cancelamento

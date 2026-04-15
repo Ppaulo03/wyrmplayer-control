@@ -303,7 +303,8 @@ def main(page: ft.Page) -> None:
     log_level.on_change = on_live_change
     log_level.on_select = on_live_change
     log_file.on_change = on_live_change
-    websocket_port.on_change = on_live_change
+    websocket_port.on_submit = on_live_change
+    websocket_port.on_blur = on_live_change
     monitor_dropdown.on_select = on_live_change
     position_dropdown.on_select = on_live_change
     t_vol.on_change = on_live_change
