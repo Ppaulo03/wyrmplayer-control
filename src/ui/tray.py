@@ -16,10 +16,10 @@ class SystemTrayManager:
     """Gerencia o ícone da bandeja e o menu de contexto."""
 
     def __init__(
-        self, 
+        self,
         on_exit_callback: Callable[[], Any],
         on_open_settings: Callable[[], Any],
-        on_reload_hotkeys: Callable[[], Any]
+        on_reload_hotkeys: Callable[[], Any],
     ) -> None:
         self.on_exit_callback = on_exit_callback
         self.on_open_settings = on_open_settings
@@ -30,7 +30,7 @@ class SystemTrayManager:
         """Abre a tela de configurações em um processo separado."""
         if self.on_open_settings:
             self.on_open_settings()
-        
+
         try:
             # Em build, abre o próprio executável em modo de configurações.
             if getattr(sys, "frozen", False):
@@ -47,21 +47,20 @@ class SystemTrayManager:
         if self.on_reload_hotkeys:
             self.on_reload_hotkeys()
 
-
     def _create_placeholder_icon(self) -> Image.Image:
         """Cria um ícone simples para a bandeja."""
         width = 64
         height = 64
         image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         dc = ImageDraw.Draw(image)
-        
+
         # Desenha um círculo âmbar (cor do nosso tema)
         dc.ellipse((8, 8, 56, 56), fill=(255, 191, 0), outline=(255, 255, 255))
-        
+
         # Pequena nota musical simbólica (um ponto e uma haste)
         dc.rectangle((30, 20, 35, 45), fill=(0, 0, 0))
         dc.ellipse((20, 40, 35, 50), fill=(0, 0, 0))
-        
+
         return image
 
     def _resolve_asset_path(self, relative_path: str) -> Path:
@@ -74,11 +73,13 @@ class SystemTrayManager:
 
     def _load_tray_icon(self) -> Image.Image:
         """Load tray icon from assets, fallback to generated placeholder."""
-        icon_path = self._resolve_asset_path(os.path.join("assets", "icon.png"))
+        icon_path = self._resolve_asset_path(os.path.join("assets", "tray.ico"))
         try:
             return Image.open(icon_path)
         except Exception as e:
-            logger.warning(f"Nao foi possivel carregar icone da tray em {icon_path}: {e}")
+            logger.warning(
+                f"Nao foi possivel carregar icone da tray em {icon_path}: {e}"
+            )
             return self._create_placeholder_icon()
 
     def _run_icon(self) -> None:
@@ -87,10 +88,12 @@ class SystemTrayManager:
             pystray.MenuItem("Music Controller", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Configurações", lambda icon, item: self._open_settings()),
-            pystray.MenuItem("Recarregar Atalhos", lambda icon, item: self._reload_hotkeys()),
+            pystray.MenuItem(
+                "Recarregar Atalhos", lambda icon, item: self._reload_hotkeys()
+            ),
             pystray.MenuItem("Sair", self._on_exit_click),
         )
-        
+
         self.icon = pystray.Icon(
             "wyrmplayer_controller",
             self._load_tray_icon(),

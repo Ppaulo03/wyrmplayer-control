@@ -28,7 +28,9 @@ def resolve_log_file_path(log_file_name: str) -> str:
     if os.path.isabs(log_file_name):
         return log_file_name
 
-    base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__)
+    base_dir = os.path.dirname(
+        sys.executable if getattr(sys, "frozen", False) else __file__
+    )
     return os.path.abspath(os.path.join(base_dir, log_file_name))
 
 
@@ -58,7 +60,9 @@ def apply_logging_configuration(level_name: str, log_file_name: str) -> str:
 
 
 log_level = getattr(logging, app_cfg.log_level.upper(), logging.INFO)
-log_file_path = resolve_log_file_path(app_cfg.log_file if hasattr(app_cfg, "log_file") else "wyrmplayer.log")
+log_file_path = resolve_log_file_path(
+    app_cfg.log_file if hasattr(app_cfg, "log_file") else "wyrmplayer.log"
+)
 logging.basicConfig(
     level=log_level,
     format=LOG_FORMAT,
@@ -144,9 +148,10 @@ async def app_main(page: ft.Page) -> None:
     state = AppState()
     loop = asyncio.get_running_loop()
     exit_event = asyncio.Event()
+    runtime_cfg = state.config.load()
 
     # 1. Inicializa o servidor WebSocket (Porta 8975)
-    server = MusicWebSocketServer(state, port=8975)
+    server = MusicWebSocketServer(state, port=runtime_cfg.websocket_port)
 
     # 2. Inicializa a lógica de controle do player
     controller = PlayerController(state, server)
@@ -241,7 +246,9 @@ def ensure_single_instance() -> bool:
             return False
 
         try:
-            _lock_file_handle = os.open(_lock_file_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            _lock_file_handle = os.open(
+                _lock_file_path, os.O_CREAT | os.O_EXCL | os.O_RDWR
+            )
         except FileExistsError:
             return False
 
