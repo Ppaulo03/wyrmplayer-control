@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 class MusicWebSocketServer:
     """Gerencia o servidor WebSocket e a comunicação de texto simples com a extensão."""
 
-    def __init__(self, state: AppState, host: str = "127.0.0.1", port: int = 8975) -> None:
+    def __init__(
+        self, state: AppState, host: str = "127.0.0.1", port: int = 8974
+    ) -> None:
         self.state = state
         self.host = host
         self.port = port
@@ -32,7 +34,9 @@ class MusicWebSocketServer:
         """Handler para conexões de entrada (Protocolo de Texto Simples)."""
         self.clients.add(websocket)
         self.state.active_connections = len(self.clients)
-        logger.info(f"Extensão conectada! (Conexões ativas: {self.state.active_connections})")
+        logger.info(
+            f"Extensão conectada! (Conexões ativas: {self.state.active_connections})"
+        )
 
         try:
             async for message in websocket:
@@ -43,7 +47,9 @@ class MusicWebSocketServer:
         finally:
             self.clients.remove(websocket)
             self.state.active_connections = len(self.clients)
-            logger.info(f"Extensão desconectada. (Conexões ativas: {self.state.active_connections})")
+            logger.info(
+                f"Extensão desconectada. (Conexões ativas: {self.state.active_connections})"
+            )
 
     def _time_to_seconds(self, time_str: str) -> int:
         """Converte formato MM:SS ou HH:MM:SS para segundos."""
@@ -71,7 +77,17 @@ class MusicWebSocketServer:
             value = value.strip()
 
             current = self.state.metadata
-            title, artist, album, cover, status, volume, duration, position, progress = (
+            (
+                title,
+                artist,
+                album,
+                cover,
+                status,
+                volume,
+                duration,
+                position,
+                progress,
+            ) = (
                 current.title,
                 current.artist,
                 current.album,
@@ -135,7 +151,7 @@ class MusicWebSocketServer:
 
                 if new_metadata != self.state.metadata:
                     self.state.metadata = new_metadata
-                    
+
                     if key == "VOLUME":
                         # Sempre atualiza a memória do último volume ativo se for > 0
                         if volume > 0:
@@ -148,14 +164,18 @@ class MusicWebSocketServer:
 
                     # Determina a categoria da mudança para os triggers do HUD
                     category = ""
-                    if key in ["TITLE", "ARTIST"]: category = "metadata"
-                    elif key == "VOLUME": category = "volume"
-                    elif key == "STATE": category = "playback"
+                    if key in ["TITLE", "ARTIST"]:
+                        category = "metadata"
+                    elif key == "VOLUME":
+                        category = "volume"
+                    elif key == "STATE":
+                        category = "playback"
 
                     # Notifica observadores com a flag de importância e categoria
                     if self._loop:
-                        self._loop.create_task(self.state.notify(major=log_meta, category=category))
-
+                        self._loop.create_task(
+                            self.state.notify(major=log_meta, category=category)
+                        )
 
                     if log_meta:
                         logger.info(
@@ -177,7 +197,6 @@ class MusicWebSocketServer:
                     except Exception as e:
                         logger.error(f"Erro ao enviar {command}: {e}")
             self.command_queue.task_done()
-
 
     def enqueue_command(self, command: str) -> None:
         """Adiciona um comando à fila de forma thread-safe."""

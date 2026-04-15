@@ -15,6 +15,7 @@ class AppConfig:
 
     volume_step: int = 5
     hud_display_time: int = 3
+    websocket_port: int = 8975
     hud_monitor: int = 0
     hud_position: str = "bottom_right"
     log_level: str = "INFO"

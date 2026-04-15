@@ -56,6 +56,14 @@ def main(page: ft.Page) -> None:
         dense=True,
         expand=True,
     )
+    websocket_port = ft.TextField(
+        label="Porta do WebSocket",
+        value=str(cfg.websocket_port),
+        hint_text="8975",
+        dense=True,
+        expand=True,
+        keyboard_type=ft.KeyboardType.NUMBER,
+    )
 
     # --- Hotkeys (captura) ---
     field_style = ft.InputBorder.OUTLINE
@@ -126,7 +134,11 @@ def main(page: ft.Page) -> None:
 
     position_dropdown = ft.Dropdown(
         label="Posição do overlay",
-        value=cfg.hud_position if cfg.hud_position in HUD_POSITION_PRESETS else "bottom_right",
+        value=(
+            cfg.hud_position
+            if cfg.hud_position in HUD_POSITION_PRESETS
+            else "bottom_right"
+        ),
         options=[
             ft.DropdownOption(key=key, text=label)
             for key, label in HUD_POSITION_PRESETS.items()
@@ -134,7 +146,9 @@ def main(page: ft.Page) -> None:
         expand=True,
     )
 
-    autosave_status = ft.Text("Salvamento automático ativo", size=12, color=ft.Colors.GREEN_300)
+    autosave_status = ft.Text(
+        "Salvamento automático ativo", size=12, color=ft.Colors.GREEN_300
+    )
 
     capture_state: dict[str, object] = {"field": None, "label": ""}
 
@@ -184,9 +198,19 @@ def main(page: ft.Page) -> None:
         return "+".join(parts)
 
     def save_settings() -> None:
+        raw_port = str(websocket_port.value or "").strip()
+        try:
+            port_value = int(raw_port)
+        except ValueError:
+            port_value = cfg.websocket_port
+
+        if port_value < 1 or port_value > 65535:
+            port_value = cfg.websocket_port
+
         new_cfg = AppConfig(
             volume_step=int(volume_step.value),
             hud_display_time=int(hud_time.value),
+            websocket_port=port_value,
             hud_monitor=int(monitor_dropdown.value or 0),
             hud_position=position_dropdown.value or "bottom_right",
             log_level=str(log_level.value or "INFO").upper(),
@@ -279,6 +303,7 @@ def main(page: ft.Page) -> None:
     log_level.on_change = on_live_change
     log_level.on_select = on_live_change
     log_file.on_change = on_live_change
+    websocket_port.on_change = on_live_change
     monitor_dropdown.on_select = on_live_change
     position_dropdown.on_select = on_live_change
     t_vol.on_change = on_live_change
@@ -300,10 +325,16 @@ def main(page: ft.Page) -> None:
                 volume_step,
                 ft.Text("Tempo do HUD (segundos)", size=13, color=ft.Colors.WHITE70),
                 hud_time,
-                ft.Text("Nível dos logs salvos no arquivo .log", size=13, color=ft.Colors.WHITE70),
+                ft.Text(
+                    "Nível dos logs salvos no arquivo .log",
+                    size=13,
+                    color=ft.Colors.WHITE70,
+                ),
                 log_level,
                 ft.Text("Nome do arquivo de log", size=13, color=ft.Colors.WHITE70),
                 log_file,
+                ft.Text("Porta do WebSocket", size=13, color=ft.Colors.WHITE70),
+                websocket_port,
             ],
             spacing=10,
             tight=True,
@@ -382,8 +413,12 @@ def main(page: ft.Page) -> None:
                 ft.TabBarView(
                     expand=True,
                     controls=[
-                        ft.Column([general_card], scroll=ft.ScrollMode.AUTO, expand=True),
-                        ft.Column([hotkeys_card], scroll=ft.ScrollMode.AUTO, expand=True),
+                        ft.Column(
+                            [general_card], scroll=ft.ScrollMode.AUTO, expand=True
+                        ),
+                        ft.Column(
+                            [hotkeys_card], scroll=ft.ScrollMode.AUTO, expand=True
+                        ),
                         ft.Column(
                             [hud_layout_card, triggers_card],
                             scroll=ft.ScrollMode.AUTO,
@@ -404,7 +439,9 @@ def main(page: ft.Page) -> None:
                 tabs,
                 ft.Row(
                     [
-                        ft.Icon(ft.Icons.CLOUD_DONE, size=16, color=ft.Colors.GREEN_300),
+                        ft.Icon(
+                            ft.Icons.CLOUD_DONE, size=16, color=ft.Colors.GREEN_300
+                        ),
                         autosave_status,
                     ],
                     spacing=8,

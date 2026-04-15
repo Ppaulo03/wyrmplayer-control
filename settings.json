@@ -1,9 +1,11 @@
 {
     "volume_step": 5,
     "hud_display_time": 3,
-    "hud_monitor": 0,
-    "hud_position": "center",
+    "websocket_port": 8974,
+    "hud_monitor": 1,
+    "hud_position": "bottom_right",
     "log_level": "INFO",
+    "log_file": "wyrmplayer.log",
     "hotkeys": {
         "play_pause": "alt gr+p",
         "next_track": "alt gr+right",
