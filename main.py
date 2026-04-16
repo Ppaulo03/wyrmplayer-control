@@ -1,9 +1,11 @@
 import asyncio
 import atexit
+import ctypes
 import logging
 import os
 import sys
 import tempfile
+import time
 from typing import Awaitable, Callable
 
 import flet as ft
@@ -95,6 +97,15 @@ async def watch_config_changes(
     last_log_file = state.config.load().log_file
     last_websocket_port = state.config.load().websocket_port
 
+    # Debounce de lock/unlock para evitar resets repetidos por oscilacao do desktop.
+    raw_input_desktop_accessible = hotkeys.is_input_desktop_accessible()
+    stable_input_desktop_accessible = raw_input_desktop_accessible
+    stable_state_samples = 1
+    stable_samples_required = 3
+    lock_observed = False
+    last_unlock_rebind_at = 0.0
+    unlock_rebind_cooldown_seconds = 8.0
+
     if os.path.exists(settings_path):
         try:
             last_mtime = os.path.getmtime(settings_path)
@@ -103,6 +114,32 @@ async def watch_config_changes(
 
     while not exit_event.is_set():
         await asyncio.sleep(0.4)
+
+        current_input_desktop_accessible = hotkeys.is_input_desktop_accessible()
+        if current_input_desktop_accessible == raw_input_desktop_accessible:
+            stable_state_samples += 1
+        else:
+            raw_input_desktop_accessible = current_input_desktop_accessible
+            stable_state_samples = 1
+
+        # So considera mudanca real quando o estado se mantem por algumas amostras.
+        if (
+            stable_state_samples >= stable_samples_required
+            and stable_input_desktop_accessible != raw_input_desktop_accessible
+        ):
+            stable_input_desktop_accessible = raw_input_desktop_accessible
+
+            if not stable_input_desktop_accessible:
+                lock_observed = True
+            elif lock_observed:
+                now = time.monotonic()
+                if now - last_unlock_rebind_at >= unlock_rebind_cooldown_seconds:
+                    hotkeys.setup(force_backend_reset=True)
+                    last_unlock_rebind_at = now
+                    logger.info(
+                        "Sessao desbloqueada: hotkeys re-registradas automaticamente."
+                    )
+                lock_observed = False
 
         if not os.path.exists(settings_path):
             continue
@@ -231,6 +268,7 @@ async def app_main(page: ft.Page) -> None:
     finally:
         server_task.cancel()
         config_watch_task.cancel()
+        hotkeys.stop()
         tray.stop()
         logger.info("Controlador encerrado com sucesso.")
         os._exit(0)
@@ -238,11 +276,35 @@ async def app_main(page: ft.Page) -> None:
 
 _lock_file_handle = None
 _lock_file_path = os.path.join(tempfile.gettempdir(), "WyrmPlayerControl.lock")
+_singleton_mutex_handle = None
 
 
 def _is_process_running(pid: int) -> bool:
     if pid <= 0:
         return False
+
+    if os.name == "nt":
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+        process_handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not process_handle:
+            return False
+
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(
+                process_handle,
+                ctypes.byref(exit_code),
+            ):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process_handle)
 
     try:
         os.kill(pid, 0)
@@ -254,10 +316,22 @@ def _is_process_running(pid: int) -> bool:
 
 def ensure_single_instance() -> bool:
     """Ensure only one Windows instance runs at a time."""
-    global _lock_file_handle
+    global _lock_file_handle, _singleton_mutex_handle
 
     if os.name != "nt":
         return True
+
+    ERROR_ALREADY_EXISTS = 183
+    mutex_name = "Global\\WyrmPlayerControlSingleton"
+    mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+    if mutex_handle:
+        _singleton_mutex_handle = mutex_handle
+        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            return False
+        return True
+
+    # Fallback legado para casos raros de falha no mutex.
+    logger.warning("Falha ao criar mutex de instancia unica; usando lockfile legado.")
 
     try:
         _lock_file_handle = os.open(_lock_file_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
@@ -294,7 +368,11 @@ def ensure_single_instance() -> bool:
 
 def _release_lock() -> None:
     """Release the file lock on exit."""
-    global _lock_file_handle
+    global _lock_file_handle, _singleton_mutex_handle
+
+    if os.name == "nt" and _singleton_mutex_handle:
+        ctypes.windll.kernel32.CloseHandle(_singleton_mutex_handle)
+        _singleton_mutex_handle = None
 
     if not _lock_file_handle:
         return

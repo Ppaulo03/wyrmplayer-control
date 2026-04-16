@@ -3,7 +3,7 @@
     "hud_display_time": 3,
     "websocket_port": 8974,
     "hud_monitor": 1,
-    "hud_position": "bottom_right",
+    "hud_position": "bottom_left",
     "log_level": "INFO",
     "log_file": "wyrmplayer.log",
     "hotkeys": {
