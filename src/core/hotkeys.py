@@ -1,14 +1,18 @@
 import ctypes
-from ctypes import wintypes
 import logging
 import os
 import queue
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
+from ctypes import wintypes
+from typing import Any, cast, Optional
 
 import keyboard
 
+from src.core.config import ConfigManager
+from src.core.utils import keyboard as keyboard_utils
+from src.infrastructure import win32
 from src.services.player_controller import PlayerController
 
 logger = logging.getLogger(__name__)
@@ -17,43 +21,23 @@ logger = logging.getLogger(__name__)
 class HotkeyManager:
     """Gerencia a configuração e registro de atalhos de teclado."""
 
-    def __init__(self, controller: PlayerController) -> None:
+    def __init__(self, controller: PlayerController, config: ConfigManager) -> None:
         self.controller = controller
+        self.config = config
         self._is_windows = os.name == "nt"
         self._user32 = ctypes.windll.user32 if self._is_windows else None
 
+        # Native hotkey support (fallback for Windows)
         self._native_thread: threading.Thread | None = None
         self._native_ready = threading.Event()
         self._native_stop = threading.Event()
         self._native_commands: queue.Queue[
-            tuple[str, object, threading.Event, dict[str, object]]
+            tuple[str, Any, threading.Event, dict[str, Any]]
         ] = queue.Queue()
         self._native_callbacks: dict[int, Callable[[], None]] = {}
         self._next_hotkey_id = 1
 
-    def _expand_shortcut_variants(self, shortcut: str) -> list[str]:
-        """Expande variações equivalentes para melhorar compatibilidade de layout."""
-        raw = shortcut.strip()
-        if not raw:
-            return []
-
-        variants = [raw]
-        lowered = raw.lower()
-
-        # No Windows, AltGr costuma equivaler a Ctrl+Alt.
-        if "alt gr" in lowered:
-            variants.append(lowered.replace("alt gr", "ctrl+alt"))
-            variants.append(lowered.replace("alt gr", "right alt"))
-
-        deduped: list[str] = []
-        for variant in variants:
-            normalized = "+".join(
-                part.strip() for part in variant.split("+") if part.strip()
-            )
-            if normalized and normalized not in deduped:
-                deduped.append(normalized)
-
-        return deduped
+    # Métodos delegados para keyboard_utils
 
     def _safe_hotkey_callback(
         self, name: str, callback: Callable[[], None]
@@ -151,9 +135,8 @@ class HotkeyManager:
                 # Processa comandos de registro/desregistro na MESMA thread.
                 while True:
                     try:
-                        command, payload, done_event, result = (
-                            self._native_commands.get_nowait()
-                        )
+                        item = self._native_commands.get_nowait()
+                        command, payload, done_event, result = item
                     except queue.Empty:
                         break
 
@@ -164,9 +147,11 @@ class HotkeyManager:
                                 self._native_callbacks.pop(hotkey_id, None)
                             result["ok"] = True
                         elif command == "register_batch":
-                            registrations = payload  # type: ignore[assignment]
+                            registrations = cast(
+                                list[tuple[int, int, str, Callable[[], None]]], payload
+                            )
                             registered_count = 0
-                            for mods, vk, callback_name, callback in registrations:  # type: ignore[misc]
+                            for mods, vk, callback_name, callback in registrations:
                                 hotkey_id = self._next_hotkey_id
                                 self._next_hotkey_id += 1
 
@@ -208,9 +193,11 @@ class HotkeyManager:
                     ctypes.byref(msg), None, 0, 0, PM_REMOVE
                 ):
                     if msg.message == WM_HOTKEY:
-                        callback = self._native_callbacks.get(int(msg.wParam))
-                        if callback:
-                            callback()
+                        cb: Callable[[], None] | None = self._native_callbacks.get(
+                            int(msg.wParam)
+                        )
+                        if cb is not None:
+                            cb()
 
                 time.sleep(0.01)
 
@@ -220,18 +207,54 @@ class HotkeyManager:
 
         return bool(self._native_thread and self._native_thread.is_alive())
 
-    def _send_native_command(self, command: str, payload: object = None) -> bool:
+    def _send_native_command(self, command: str, payload: Any = None) -> bool:
         if not self._ensure_native_thread():
             return False
 
         done_event = threading.Event()
-        result: dict[str, object] = {}
+        result: dict[str, Any] = {}
         self._native_commands.put((command, payload, done_event, result))
         done_event.wait(timeout=2.0)
         return bool(result.get("ok", False))
 
+    def _setup_low_level_keyboard_hotkeys(
+        self, hotkey_map: dict[str, Callable[[], None]]
+    ) -> bool:
+        """Registra hotkeys usando biblioteca keyboard com suporte a fullscreen."""
+        # Use the keyboard library with suppress=False to allow input to pass through
+        # This will work in fullscreen games
+        unsupported: list[str] = []
+
+        for shortcut, callback in hotkey_map.items():
+            safe_callback = self._safe_hotkey_callback(shortcut, callback)
+            for variant in keyboard_utils.expand_shortcut_variants(shortcut):
+                try:
+                    # suppress=False allows keys to pass through to the game
+                    # This is the key to fullscreen game support
+                    keyboard.add_hotkey(variant, safe_callback, suppress=False)
+                    logger.info(
+                        "Hotkey configurada (fullscreen compatible): %s", variant
+                    )
+                except Exception as e:
+                    logger.error("Erro ao registrar hotkey '%s': %s", variant, e)
+                    unsupported.append(shortcut)
+
+        if unsupported:
+            logger.warning(
+                "Hotkeys não suportadas: %s",
+                ", ".join(set(unsupported)),
+            )
+
+        ok = len(hotkey_map) > 0 and len(set(unsupported)) < len(hotkey_map)
+        if ok:
+            logger.info(
+                "Sistema de Hotkeys configurado com sucesso (fullscreen compatible)."
+            )
+
+        return ok
+
     def _setup_native_hotkeys(self, hotkey_map: dict[str, Callable[[], None]]) -> bool:
-        """Registra hotkeys globais no backend nativo do Windows."""
+        """Registra hotkeys globais no backend nativo do Windows (fallback)."""
         if not self._is_windows:
             return False
 
@@ -266,7 +289,7 @@ class HotkeyManager:
 
     def setup(self, force_backend_reset: bool = False) -> None:
         """Registra os atalhos baseados na configuração persistente."""
-        cfg = self.controller.state.config.load()
+        cfg = self.config.load()
         hk = cfg.hotkeys
 
         hotkey_map = {
@@ -279,59 +302,31 @@ class HotkeyManager:
         }
         hotkey_map = {shortcut: cb for shortcut, cb in hotkey_map.items() if shortcut}
 
+        if force_backend_reset:
+            self.stop()
+
+        # Use keyboard library with fullscreen game support (suppress=False)
+        if self._setup_low_level_keyboard_hotkeys(hotkey_map):
+            return
+
+        # Fallback: native Windows hotkeys (doesn't work in fullscreen)
         if self._is_windows:
-            # O backend nativo e estavel em lock/unlock no Windows.
-            if force_backend_reset:
-                self.stop()
             if self._setup_native_hotkeys(hotkey_map):
                 return
-
-        # Fallback multiplataforma via keyboard.
-        self._clear_keyboard_hotkeys()
-        for shortcut, callback in hotkey_map.items():
-            wrapped_callback = self._safe_hotkey_callback(shortcut, callback)
-            for variant in self._expand_shortcut_variants(shortcut):
-                try:
-                    keyboard.add_hotkey(variant, wrapped_callback)
-                    logger.info("Hotkey configurada: %s", variant)
-                except Exception as e:
-                    logger.error("Erro ao registrar hotkey '%s': %s", variant, e)
 
         logger.info("Sistema de Hotkeys configurado com sucesso.")
 
     def stop(self) -> None:
         """Libera registros de hotkeys no encerramento do app."""
+        # Stop native hotkeys
         if self._is_windows:
             self._send_native_command("stop")
             self._native_thread = None
             self._native_callbacks.clear()
 
+        # Stop keyboard library hotkeys
         self._clear_keyboard_hotkeys()
 
     def is_input_desktop_accessible(self) -> bool:
         """Retorna se o desktop de entrada atual esta acessivel (sessao desbloqueada)."""
-        if not self._is_windows:
-            return True
-
-        assert self._user32 is not None
-        DESKTOP_SWITCHDESKTOP = 0x0100
-
-        self._user32.OpenInputDesktop.argtypes = [
-            wintypes.DWORD,
-            wintypes.BOOL,
-            wintypes.DWORD,
-        ]
-        self._user32.OpenInputDesktop.restype = wintypes.HANDLE
-        self._user32.SwitchDesktop.argtypes = [wintypes.HANDLE]
-        self._user32.SwitchDesktop.restype = wintypes.BOOL
-        self._user32.CloseDesktop.argtypes = [wintypes.HANDLE]
-        self._user32.CloseDesktop.restype = wintypes.BOOL
-
-        desktop_handle = self._user32.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
-        if not desktop_handle:
-            return False
-
-        try:
-            return bool(self._user32.SwitchDesktop(desktop_handle))
-        finally:
-            self._user32.CloseDesktop(desktop_handle)
+        return not win32.is_desktop_locked()

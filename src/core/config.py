@@ -2,9 +2,10 @@ import json
 import logging
 import os
 import sys
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from dataclasses import asdict, dataclass, field, fields as dataclass_fields
-from typing import Any, Dict
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class AppConfig:
     log_level: str = "INFO"
     log_file: str = "wyrmplayer.log"
     # Atalhos Globais
-    hotkeys: Dict[str, str] = field(
+    hotkeys: dict[str, str] = field(
         default_factory=lambda: {
             "play_pause": "alt gr+p",
             "next_track": "alt gr+right",
@@ -32,7 +33,7 @@ class AppConfig:
         }
     )
     # Gatilhos para o HUD aparecer
-    triggers: Dict[str, bool] = field(
+    triggers: dict[str, bool] = field(
         default_factory=lambda: {
             "volume": True,
             "metadata": True,
@@ -55,27 +56,32 @@ class ConfigManager:
             self.config_path = str((base_dir / config_file).resolve())
         self.config = self.load()
 
+    def reload(self) -> AppConfig:
+        """Força o recarregamento do arquivo e atualiza o estado interno."""
+        return self.load()
+
     def load(self) -> AppConfig:
         """Carrega configurações do arquivo ou cria padrões se não existir."""
         if not os.path.exists(self.config_path):
-            logger.info("Arquivo de configurações não encontrado. Criando padrões...")
+            logger.info(f"Arquivo de configurações não encontrado em {self.config_path}. Criando padrões...")
             default_cfg = AppConfig()
-            # Salva os padrões imediatamente para criar o arquivo
             self.config = default_cfg
             self.save()
             return default_cfg
 
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path, encoding="utf-8") as f:
                 data = json.load(f)
                 allowed_keys = {f.name for f in dataclass_fields(AppConfig)}
                 filtered_data = {k: v for k, v in data.items() if k in allowed_keys}
-                return AppConfig(**filtered_data)
+                new_cfg = AppConfig(**filtered_data)
+                self.config = new_cfg
+                return new_cfg
         except Exception as e:
-            logger.error(f"Erro ao carregar configurações: {e}. Usando padrões.")
+            logger.error(f"Erro ao carregar configurações de {self.config_path}: {e}")
             return AppConfig()
 
-    def save(self, config: AppConfig = None) -> None:
+    def save(self, config: AppConfig | None = None) -> None:
         """Salva o estado atual das configurações no arquivo JSON."""
         if config:
             self.config = config

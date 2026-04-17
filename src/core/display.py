@@ -1,13 +1,9 @@
-import ctypes
 from dataclasses import dataclass
-from ctypes import wintypes
-from typing import Callable
-
+from src.infrastructure.win32 import get_monitors_info
 
 @dataclass(frozen=True)
 class MonitorArea:
     """Representa um monitor e sua work area no Windows."""
-
     index: int
     label: str
     left: int
@@ -39,80 +35,28 @@ HUD_POSITION_PRESETS: dict[str, str] = {
 }
 
 
-class _MonitorInfo(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", wintypes.RECT),
-        ("rcWork", wintypes.RECT),
-        ("dwFlags", wintypes.DWORD),
-    ]
+def list_monitors() -> list[MonitorArea]:
+    """Lista os monitores disponíveis abstraindo a complexidade do Win32."""
+    monitors_data = get_monitors_info()
+    
+    if not monitors_data:
+        # Fallback para caso de erro ou não-Windows
+        return [MonitorArea(0, "Tela 1", 0, 0, 1920, 1080, 0, 0, 1920, 1080)]
 
-
-def _fallback_monitor() -> list[MonitorArea]:
-    user32 = ctypes.windll.user32
-    screen_w = user32.GetSystemMetrics(0)
-    screen_h = user32.GetSystemMetrics(1)
     return [
         MonitorArea(
-            index=0,
-            label=f"Tela 1 ({screen_w}x{screen_h})",
-            left=0,
-            top=0,
-            right=screen_w,
-            bottom=screen_h,
-            work_left=0,
-            work_top=0,
-            work_right=screen_w,
-            work_bottom=screen_h,
-        )
+            index=m["index"],
+            label=f"Tela {m['index'] + 1} ({m['work_rect'][2] - m['work_rect'][0]}x{m['work_rect'][3] - m['work_rect'][1]})",
+            left=m["monitor_rect"][0],
+            top=m["monitor_rect"][1],
+            right=m["monitor_rect"][2],
+            bottom=m["monitor_rect"][3],
+            work_left=m["work_rect"][0],
+            work_top=m["work_rect"][1],
+            work_right=m["work_rect"][2],
+            work_bottom=m["work_rect"][3],
+        ) for m in monitors_data
     ]
-
-
-def list_monitors() -> list[MonitorArea]:
-    """Lista os monitores disponíveis e suas áreas úteis."""
-    try:
-        monitors: list[MonitorArea] = []
-        user32 = ctypes.windll.user32
-
-        monitor_enum_proc = ctypes.WINFUNCTYPE(
-            ctypes.c_bool,
-            wintypes.HANDLE,
-            wintypes.HDC,
-            ctypes.POINTER(wintypes.RECT),
-            wintypes.LPARAM,
-        )
-
-        def _callback(hmonitor, _hdc, _rect, _lparam):
-            info = _MonitorInfo()
-            info.cbSize = ctypes.sizeof(_MonitorInfo)
-            if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
-                index = len(monitors)
-                monitor_rect = info.rcMonitor
-                work_rect = info.rcWork
-                monitors.append(
-                    MonitorArea(
-                        index=index,
-                        label=f"Tela {index + 1} ({work_rect.right - work_rect.left}x{work_rect.bottom - work_rect.top})",
-                        left=monitor_rect.left,
-                        top=monitor_rect.top,
-                        right=monitor_rect.right,
-                        bottom=monitor_rect.bottom,
-                        work_left=work_rect.left,
-                        work_top=work_rect.top,
-                        work_right=work_rect.right,
-                        work_bottom=work_rect.bottom,
-                    )
-                )
-            return True
-
-        callback = monitor_enum_proc(_callback)
-        success = user32.EnumDisplayMonitors(0, 0, callback, 0)
-        if success and monitors:
-            return monitors
-    except Exception:
-        pass
-
-    return _fallback_monitor()
 
 
 def get_monitor_by_index(index: int) -> MonitorArea:
@@ -131,34 +75,20 @@ def resolve_hud_position(
     margin: int = 20,
 ) -> tuple[int, int]:
     """Resolve coordenadas da janela do HUD com base no monitor e preset."""
-    left = monitor.work_left
-    top = monitor.work_top
-    right = monitor.work_right
-    bottom = monitor.work_bottom
+    left, top, right, bottom = monitor.work_left, monitor.work_top, monitor.work_right, monitor.work_bottom
 
     max_left = max(left + 8, right - hud_width - 8)
     max_top = max(top + 8, bottom - hud_height - 8)
 
-    if preset == "bottom_left":
-        target_left = left + margin
-        target_top = bottom - hud_height - margin
-    elif preset == "top_right":
-        target_left = right - hud_width - margin
-        target_top = top + margin
-    elif preset == "top_left":
-        target_left = left + margin
-        target_top = top + margin
-    elif preset == "top_center":
-        target_left = left + (monitor.width - hud_width) // 2
-        target_top = top + margin
-    elif preset == "bottom_center":
-        target_left = left + (monitor.width - hud_width) // 2
-        target_top = bottom - hud_height - margin
-    elif preset == "center":
-        target_left = left + (monitor.width - hud_width) // 2
-        target_top = top + (monitor.height - hud_height) // 2
-    else:
-        target_left = right - hud_width - margin
-        target_top = bottom - hud_height - margin
+    positions = {
+        "bottom_left": (left + margin, bottom - hud_height - margin),
+        "top_right": (right - hud_width - margin, top + margin),
+        "top_left": (left + margin, top + margin),
+        "top_center": (left + (monitor.width - hud_width) // 2, top + margin),
+        "bottom_center": (left + (monitor.width - hud_width) // 2, bottom - hud_height - margin),
+        "center": (left + (monitor.width - hud_width) // 2, top + (monitor.height - hud_height) // 2),
+    }
+
+    target_left, target_top = positions.get(preset, (right - hud_width - margin, bottom - hud_height - margin))
 
     return max(left + 8, min(target_left, max_left)), max(top + 8, min(target_top, max_top))

@@ -3,8 +3,9 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, cast
 
 import pystray
 from PIL import Image, ImageDraw
@@ -24,11 +25,11 @@ class SystemTrayManager:
         self.on_exit_callback = on_exit_callback
         self.on_open_settings = on_open_settings
         self.on_reload_hotkeys = on_reload_hotkeys
-        self.icon: Optional[Any] = None
+        self.icon: pystray.Icon | None = None
 
     def _open_settings(self) -> None:
         """Abre a tela de configurações em um processo separado."""
-        if self.on_open_settings:
+        if self.on_open_settings is not None:
             self.on_open_settings()
 
         try:
@@ -44,7 +45,7 @@ class SystemTrayManager:
     def _reload_hotkeys(self) -> None:
         """Solicita ao HotkeyManager que recarregue os atalhos."""
         logger.info("Solicitando recarregamento de atalhos...")
-        if self.on_reload_hotkeys:
+        if self.on_reload_hotkeys is not None:
             self.on_reload_hotkeys()
 
     def _create_placeholder_icon(self) -> Image.Image:
@@ -66,7 +67,7 @@ class SystemTrayManager:
     def _resolve_asset_path(self, relative_path: str) -> Path:
         """Resolve paths both in source mode and PyInstaller frozen mode."""
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            base_dir = Path(getattr(sys, "_MEIPASS"))
+            base_dir = Path(cast(str, sys._MEIPASS))
         else:
             base_dir = Path(__file__).resolve().parents[2]
         return base_dir / relative_path
@@ -77,9 +78,7 @@ class SystemTrayManager:
         try:
             return Image.open(icon_path)
         except Exception as e:
-            logger.warning(
-                f"Nao foi possivel carregar icone da tray em {icon_path}: {e}"
-            )
+            logger.warning(f"Nao foi possivel carregar icone da tray em {icon_path}: {e}")
             return self._create_placeholder_icon()
 
     def _run_icon(self) -> None:
@@ -88,9 +87,7 @@ class SystemTrayManager:
             pystray.MenuItem("Music Controller", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Configurações", lambda icon, item: self._open_settings()),
-            pystray.MenuItem(
-                "Recarregar Atalhos", lambda icon, item: self._reload_hotkeys()
-            ),
+            pystray.MenuItem("Recarregar Atalhos", lambda icon, item: self._reload_hotkeys()),
             pystray.MenuItem("Sair", self._on_exit_click),
         )
 
@@ -105,9 +102,9 @@ class SystemTrayManager:
     def _on_exit_click(self, icon: Any, item: Any) -> None:
         """Chamado quando o usuário clica em Sair."""
         logger.info("Solicitação de saída via System Tray.")
-        if self.icon:
+        if self.icon is not None:
             self.icon.stop()
-        if self.on_exit_callback:
+        if self.on_exit_callback is not None:
             self.on_exit_callback()
 
     def start(self) -> None:
@@ -118,5 +115,5 @@ class SystemTrayManager:
 
     def stop(self) -> None:
         """Interrompe o ícone da bandeja, se estiver ativo."""
-        if self.icon:
+        if self.icon is not None:
             self.icon.stop()
