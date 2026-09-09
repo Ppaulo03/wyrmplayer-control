@@ -2,12 +2,10 @@
 
 Plano de trabalho para as próximas expansões do WyrmPlayerControl, organizado por fase. Cada fase é razoavelmente independente das seguintes, mas a ordem importa onde há dependência técnica (ver notas).
 
-## Fase 0 — Corrigir bugs já identificados
+## Fase 0 — Corrigir bugs já identificados ✅ concluída
 
-Debt pequeno e independente, sem dependências entre si. Fazer primeiro por serem rápidos e não bloquearem nada.
-
-1. **Hotkey de mute (`alt gr+,`) nunca registra.** A lib `keyboard` falha ao normalizar o nome da tecla `,` nas 3 variantes tentadas (`alt gr+,`, `ctrl+alt+,`, `right alt+,`). Já existe uma tarefa em background sinalizada para isso (`task_adc04d1c`).
-2. **`ConfigWatcher.on_websocket_port_change` nunca é chamado.** O callback está todo cabeado (`main.py` passa `restart_websocket_server`, `ConfigWatcher` guarda `last_websocket_port`), mas `_check_config_file` nunca compara `cfg.websocket_port != self.last_websocket_port` nem invoca o callback — mudar a porta pelo `settings.json` em runtime não reinicia o servidor WebSocket. Achado durante a sessão de trabalho na integração com Spotify, ainda não corrigido.
+1. ✅ **Hotkey de mute (`alt gr+,`) nunca registrava.** Corrigido traduzindo `,` para o nome canônico `comma` (a lib `keyboard` reserva vírgula como separador de múltiplos passos) e adicionando `VK_OEM_COMMA` ao fallback nativo. Testes de regressão em `test_keyboard_utils.py`.
+2. ✅ **Hot-reload de `websocket_port`, `log_level` e `log_file` não fazia nada.** `ConfigWatcher._check_config_file` rastreava esses valores mas nunca comparava/chamava os callbacks. Corrigido — agora `on_websocket_port_change` e `apply_logging_configuration` são invocados de verdade. Cobertura nova em `tests/test_config_watcher.py`.
 
 ## Fase 1 — Iniciar com o Windows
 
