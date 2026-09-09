@@ -27,6 +27,9 @@ class AppConfig:
     spotify_integration: bool = False
     # Registra (ou remove) o app em HKCU\...\Run para iniciar junto com o Windows.
     start_with_windows: bool = False
+    # Se True, inicia elevado (mostra confirmação do UAC a cada login) para garantir
+    # os atalhos globais sobre janelas/jogos que também rodam elevados.
+    start_with_windows_elevated: bool = False
     # Atalhos Globais
     hotkeys: dict[str, str] = field(
         default_factory=lambda: {

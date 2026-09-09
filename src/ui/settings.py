@@ -51,6 +51,7 @@ def main(page: ft.Page) -> None:
                 log_file=(g_data["log_file"].value or "wyrmplayer.log").strip(),
                 spotify_integration=bool(g_data["spotify_integration"].value),
                 start_with_windows=bool(g_data["start_with_windows"].value),
+                start_with_windows_elevated=bool(g_data["start_with_windows_elevated"].value),
                 hud_monitor=int(l_data["hud_monitor"].value or 0),
                 hud_position=l_data["hud_position"].value or "bottom_right",
                 hotkeys={k: (v.value or "").strip() for k, v in h_data.items()},
@@ -61,7 +62,7 @@ def main(page: ft.Page) -> None:
                 },
             )
             config_manager.save(new_cfg)
-            autostart.sync(new_cfg.start_with_windows)
+            autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
         except Exception as e:
             autosave_status.value = f"Erro ao salvar: {e}"
             autosave_status.color = ft.Colors.RED_400

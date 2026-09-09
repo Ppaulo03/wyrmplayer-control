@@ -33,7 +33,7 @@ cfg_manager = ConfigManager()
 app_cfg = cfg_manager.load()
 
 # Alinha o registro de "iniciar com o Windows" ao valor salvo (cobre edição manual do settings.json)
-autostart.sync(app_cfg.start_with_windows)
+autostart.sync(app_cfg.start_with_windows, elevated=app_cfg.start_with_windows_elevated)
 
 # Configuração de Logging
 log_file_path = setup_initial_logging(
