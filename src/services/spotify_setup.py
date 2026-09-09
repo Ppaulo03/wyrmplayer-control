@@ -130,12 +130,19 @@ def _run_spicetify(
 ) -> subprocess.CompletedProcess[str]:
     """
     Roda um comando do Spicetify, sem privilégios administrativos de verdade quando
-    `avoid_admin` é True — nunca usa a flag `--bypass-admin` do Spicetify, que só
-    ignora o aviso e mantém o comando rodando elevado (com o risco real que o
-    próprio Spicetify descreve).
+    `avoid_admin` é True (via `win32.run_command_unelevated`, verificado rodando em
+    nível de integridade Médio de verdade, não apenas ignorando o aviso).
+
+    O token criado por logon S4U (usado pela tarefa agendada) faz o Spicetify
+    detectar erroneamente elevação mesmo rodando em nível Médio — por isso,
+    quando `avoid_admin` é True, também passamos `--bypass-admin`. Isso só é
+    seguro aqui porque a execução já é genuinamente não-elevada; nunca passe
+    `--bypass-admin` num comando que roda realmente elevado.
     """
     if avoid_admin:
-        return win32.run_command_unelevated(command, timeout=timeout)
+        # A tarefa agendada adiciona latência (agendar, despachar, rodar) além do
+        # tempo do próprio comando — folga extra evita falso timeout.
+        return win32.run_command_unelevated([*command, "--bypass-admin"], timeout=timeout + 30)
     return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
 
 
