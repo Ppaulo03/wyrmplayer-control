@@ -23,6 +23,12 @@ def test_expand_variants_simple():
     assert variants == ["ctrl+s"]
 
 
+def test_expand_variants_comma_key_uses_canonical_name():
+    """ "," colide com o separador de múltiplos passos da lib `keyboard` (ex.: "a, b")."""
+    variants = kb.expand_shortcut_variants("alt gr+,")
+    assert variants == ["alt gr+comma", "ctrl+alt+comma", "right alt+comma"]
+
+
 class MockEvent:
     def __init__(self, key, ctrl=False, alt=False, shift=False, meta=False):
         self.key = key

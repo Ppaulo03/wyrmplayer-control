@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from src.core.config import ConfigManager
 from src.core.hotkeys import HotkeyManager
+from src.core.logging_config import apply_logging_configuration
 from src.core.state import AppState
 from src.ui.hud import MusicHUD
 
@@ -138,6 +139,22 @@ class ConfigWatcher:
                 await self.hud.show_hud(display_time=cfg.hud_display_time)
             else:
                 self.hud.apply_layout()
+
+            # Porta do WebSocket
+            if cfg.websocket_port != self.last_websocket_port:
+                new_port = cfg.websocket_port
+                self.last_websocket_port = new_port
+                await self.on_websocket_port_change(new_port)
+                logger.info("Porta do WebSocket alterada para %s.", new_port)
+
+            # Nível/arquivo de log
+            if cfg.log_level != self.last_log_level or cfg.log_file != self.last_log_file:
+                self.last_log_level = cfg.log_level
+                self.last_log_file = cfg.log_file
+                apply_logging_configuration(cfg.log_level, cfg.log_file)
+                logger.info(
+                    "Logging reconfigurado: nível=%s, arquivo=%s.", cfg.log_level, cfg.log_file
+                )
 
             # Integração com Spotify (só afeta visibilidade do item na tray)
             if cfg.spotify_integration != self.last_spotify_integration:
