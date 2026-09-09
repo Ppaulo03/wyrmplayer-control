@@ -7,14 +7,13 @@ Plano de trabalho para as próximas expansões do WyrmPlayerControl, organizado 
 1. ✅ **Hotkey de mute (`alt gr+,`) nunca registrava.** Corrigido traduzindo `,` para o nome canônico `comma` (a lib `keyboard` reserva vírgula como separador de múltiplos passos) e adicionando `VK_OEM_COMMA` ao fallback nativo. Testes de regressão em `test_keyboard_utils.py`.
 2. ✅ **Hot-reload de `websocket_port`, `log_level` e `log_file` não fazia nada.** `ConfigWatcher._check_config_file` rastreava esses valores mas nunca comparava/chamava os callbacks. Corrigido — agora `on_websocket_port_change` e `apply_logging_configuration` são invocados de verdade. Cobertura nova em `tests/test_config_watcher.py`.
 
-## Fase 1 — Iniciar com o Windows
+## Fase 1 — Iniciar com o Windows ✅ concluída
 
-Feature isolada e rápida, sem dependência de UI nova.
-
-- Novo campo `AppConfig.start_with_windows: bool`.
-- Toggle na aba **Geral** das configurações.
-- Implementação via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (não precisa admin) — adiciona/remove uma entrada apontando pro executável (ou `python.exe src/main.py` em modo dev) quando o toggle muda.
-- Cuidado: em build (PyInstaller), o caminho registrado deve ser o `.exe` final, não o script Python.
+- `AppConfig.start_with_windows: bool` + toggle na aba **Geral**.
+- `src/core/autostart.py` gerencia `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (não precisa admin), com `sync()` idempotente chamado ao salvar nas configurações e no startup do `main.py`.
+- Usa `pythonw.exe` em modo dev (sem console) e o próprio executável em build (PyInstaller).
+- Decisão consciente: o comando registrado usa `--no-admin-relaunch` pra não pedir UAC a cada login — trade-off documentado no README (hotkeys podem não funcionar sobre janelas elevadas até reabrir manualmente).
+- Testado de ponta a ponta contra o registro real (enable → is_enabled → disable, sem deixar resíduo).
 
 ## Fase 2 — Rework visual do HUD
 
