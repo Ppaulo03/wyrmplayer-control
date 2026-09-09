@@ -45,9 +45,10 @@ def main(page: ft.Page) -> None:
             new_cfg = AppConfig(
                 volume_step=int(g_data["volume_step"].value or 5),
                 hud_display_time=int(g_data["hud_display_time"].value or 3),
-                websocket_port=int(g_data["websocket_port"].value or 8975),
+                websocket_port=int(g_data["websocket_port"].value or 8974),
                 log_level=str(g_data["log_level"].value or "INFO").upper(),
                 log_file=(g_data["log_file"].value or "wyrmplayer.log").strip(),
+                spotify_integration=bool(g_data["spotify_integration"].value),
                 hud_monitor=int(l_data["hud_monitor"].value or 0),
                 hud_position=l_data["hud_position"].value or "bottom_right",
                 hotkeys={k: (v.value or "").strip() for k, v in h_data.items()},
@@ -103,7 +104,10 @@ def main(page: ft.Page) -> None:
             [
                 tabs_control,
                 ft.Row(
-                    [ft.Icon(ft.Icons.CLOUD_DONE, size=16, color=ft.Colors.GREEN_300), autosave_status],
+                    [
+                        ft.Icon(ft.Icons.CLOUD_DONE, size=16, color=ft.Colors.GREEN_300),
+                        autosave_status,
+                    ],
                     spacing=8,
                 ),
             ],

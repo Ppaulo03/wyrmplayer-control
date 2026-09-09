@@ -5,7 +5,6 @@ import sys
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +15,16 @@ class AppConfig:
 
     volume_step: int = 5
     hud_display_time: int = 3
-    websocket_port: int = 8975
+    # 8974 é a porta padrão do protocolo WebNowPlaying, usada tanto pela extensão
+    # de navegador (YouTube Music) quanto pela extensão webnowplaying.js do
+    # Spicetify (Spotify) — que não permite configurar outra porta.
+    websocket_port: int = 8974
     hud_monitor: int = 0
     hud_position: str = "bottom_right"
     log_level: str = "INFO"
     log_file: str = "wyrmplayer.log"
+    # Habilita a checagem/configuração automática da integração com Spotify (Spicetify) no startup.
+    spotify_integration: bool = False
     # Atalhos Globais
     hotkeys: dict[str, str] = field(
         default_factory=lambda: {
@@ -63,7 +67,9 @@ class ConfigManager:
     def load(self) -> AppConfig:
         """Carrega configurações do arquivo ou cria padrões se não existir."""
         if not os.path.exists(self.config_path):
-            logger.info(f"Arquivo de configurações não encontrado em {self.config_path}. Criando padrões...")
+            logger.info(
+                f"Arquivo de configurações não encontrado em {self.config_path}. Criando padrões..."
+            )
             default_cfg = AppConfig()
             self.config = default_cfg
             self.save()

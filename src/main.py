@@ -13,18 +13,19 @@ import flet as ft
 
 from src.core.config import ConfigManager
 from src.core.hotkeys import HotkeyManager
-from src.core.state import AppState
-from src.core.websocket import MusicWebSocketServer
-from src.infrastructure import win32
-from src.services.player_controller import PlayerController
-from src.ui.hud import MusicHUD
-from src.ui.settings import main as settings_main
-from src.ui.tray import SystemTrayManager
 
 # Evolução Arquitetural
 from src.core.logging_config import setup_initial_logging
 from src.core.single_instance import SingleInstance
+from src.core.state import AppState
+from src.core.websocket import MusicWebSocketServer
+from src.infrastructure import win32
+from src.services import spotify_setup
 from src.services.config_watcher import ConfigWatcher
+from src.services.player_controller import PlayerController
+from src.ui.hud import MusicHUD
+from src.ui.settings import main as settings_main
+from src.ui.tray import SystemTrayManager
 
 # Inicialização do Gerenciador de Configuração
 cfg_manager = ConfigManager()
@@ -40,6 +41,54 @@ logger.info(f"Log file initialized at {log_file_path} with level {app_cfg.log_le
 
 # Gerenciador de Instância Única
 single_instance = SingleInstance()
+
+
+def _handle_configure_spotify() -> None:
+    """
+    Callback da tray para checar/aplicar a integração com Spotify via Spicetify.
+
+    Roda na thread do ícone da tray (pystray), não na loop asyncio — chamadas
+    bloqueantes (subprocess, MessageBoxW) aqui são seguras e esperadas.
+    """
+    cfg = cfg_manager.load()
+    status = spotify_setup.check_status(cfg.websocket_port)
+
+    if status.spicetify_path is None:
+        win32.info_dialog(
+            "Spotify",
+            "Spicetify não foi encontrado. Instale-o manualmente em "
+            "https://spicetify.app e tente novamente.",
+        )
+        return
+
+    if not status.port_matches:
+        win32.info_dialog(
+            "Spotify",
+            f"A porta configurada ({cfg.websocket_port}) não é a esperada pela extensão "
+            f"do Spicetify ({spotify_setup.WEBNOWPLAYING_PORT}). Ajuste 'websocket_port' "
+            "em settings.json e reinicie o app antes de continuar.",
+        )
+        return
+
+    if not status.extension_enabled and not spotify_setup.configure_extension(
+        status.spicetify_path
+    ):
+        win32.info_dialog("Spotify", "Falha ao configurar a extensão. Veja o log para detalhes.")
+        return
+
+    proceed = win32.confirm_dialog(
+        "Spotify",
+        "Isso vai reiniciar o cliente do Spotify para aplicar a integração. Continuar?",
+        warning=True,
+    )
+    if not proceed:
+        logger.info("Spotify setup: usuário cancelou a aplicação (spicetify apply).")
+        return
+
+    if spotify_setup.apply_changes(status.spicetify_path):
+        win32.info_dialog("Spotify", "Integração aplicada com sucesso.")
+    else:
+        win32.info_dialog("Spotify", "Falha ao aplicar as mudanças. Veja o log para detalhes.")
 
 
 async def app_main(page: ft.Page) -> None:
@@ -93,6 +142,8 @@ async def app_main(page: ft.Page) -> None:
         on_exit_callback=signal_exit,
         on_open_settings=lambda: None,
         on_reload_hotkeys=signal_reload,
+        on_configure_spotify=_handle_configure_spotify,
+        is_spotify_integration_enabled=lambda: cfg_manager.load().spotify_integration,
     )
     tray.start()
 
@@ -107,12 +158,19 @@ async def app_main(page: ft.Page) -> None:
         state=state,
         config=cfg_manager,
         on_websocket_port_change=restart_websocket_server,
+        on_spotify_integration_change=tray.refresh_menu,
     )
 
     # 7. Inicia tarefas em background
     logger.info("Iniciando tarefas de background...")
     server_task = asyncio.create_task(server.start())
     config_watch_task = asyncio.create_task(watcher.start(exit_event))
+
+    spotify_check_task: asyncio.Task[spotify_setup.SpotifySetupStatus] | None = None
+    if runtime_cfg.spotify_integration:
+        spotify_check_task = asyncio.create_task(
+            asyncio.to_thread(spotify_setup.run_startup_check, runtime_cfg.websocket_port)
+        )
 
     # Aguarda o sinal de saída do Tray ou cancelamento do loop
     try:
@@ -124,7 +182,7 @@ async def app_main(page: ft.Page) -> None:
         logger.error(f"Erro inesperado no loop principal: {e}")
     finally:
         # Cancelamento das tarefas em background
-        for task in [server_task, config_watch_task]:
+        for task in [server_task, config_watch_task, spotify_check_task]:
             if task and not task.done():
                 task.cancel()
 

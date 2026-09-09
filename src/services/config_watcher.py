@@ -3,34 +3,38 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
+
 from src.core.config import ConfigManager
 from src.core.hotkeys import HotkeyManager
-from src.ui.hud import MusicHUD
 from src.core.state import AppState
-from src.core.logging_config import apply_logging_configuration
+from src.ui.hud import MusicHUD
 
 logger = logging.getLogger(__name__)
+
 
 class ConfigWatcher:
     """
     Service that monitors settings.json for changes and updates application components.
     Also handles re-binding hotkeys on Windows session unlock events.
     """
+
     def __init__(
         self,
         hotkeys: HotkeyManager,
         hud: MusicHUD,
         state: AppState,
         config: ConfigManager,
-        on_websocket_port_change: Callable[[int], Awaitable[None]]
+        on_websocket_port_change: Callable[[int], Awaitable[None]],
+        on_spotify_integration_change: Callable[[], None],
     ):
         self.hotkeys = hotkeys
         self.hud = hud
         self.state = state
         self.config = config
         self.on_websocket_port_change = on_websocket_port_change
+        self.on_spotify_integration_change = on_spotify_integration_change
         self.settings_path = config.config_path
-        
+
         # Internal state
         self.last_mtime: float | None = None
         current_cfg = self.config.load()
@@ -39,6 +43,7 @@ class ConfigWatcher:
         self.last_log_level = current_cfg.log_level
         self.last_log_file = current_cfg.log_file
         self.last_websocket_port = current_cfg.websocket_port
+        self.last_spotify_integration = current_cfg.spotify_integration
 
         # Debounce/Windows Session state
         self.raw_input_desktop_accessible = hotkeys.is_input_desktop_accessible()
@@ -111,7 +116,7 @@ class ConfigWatcher:
             cfg = self.config.reload()
             # Atualiza mtime apos leitura confirmada
             self.last_mtime = os.path.getmtime(self.settings_path)
-            
+
             logger.info(f"Mudança de arquivo detectada! mtime: {self.last_mtime}. Recarregando...")
 
             # Hotkeys change
@@ -119,16 +124,29 @@ class ConfigWatcher:
                 self.hotkeys.setup()
                 self.last_hotkeys = cfg.hotkeys.copy()
                 logger.info("Hotkeys recarregadas.")
-            
+
             # HUD change
             current_hud_layout = (cfg.hud_monitor, cfg.hud_position)
             if current_hud_layout != old_layout:
                 self.last_hud_layout = current_hud_layout
-                logger.info(f"HUD alterado: Monitor {cfg.hud_monitor}, Posição {cfg.hud_position}. Forçando exibição.")
+                logger.info(
+                    "HUD alterado: Monitor %s, Posição %s. Forçando exibição.",
+                    cfg.hud_monitor,
+                    cfg.hud_position,
+                )
                 self.hud.apply_layout()
                 await self.hud.show_hud(display_time=cfg.hud_display_time)
             else:
                 self.hud.apply_layout()
+
+            # Integração com Spotify (só afeta visibilidade do item na tray)
+            if cfg.spotify_integration != self.last_spotify_integration:
+                self.last_spotify_integration = cfg.spotify_integration
+                self.on_spotify_integration_change()
+                logger.info(
+                    "Integração com Spotify %s.",
+                    "ativada" if cfg.spotify_integration else "desativada",
+                )
 
         except Exception as e:
             logger.error(f"Falha ao processar mudança de configuração: {e}")

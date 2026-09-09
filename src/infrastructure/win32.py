@@ -1,11 +1,11 @@
 import ctypes
-import os
 import logging
+import os
 import sys
 import threading
-import queue
+from collections.abc import Callable
 from ctypes import wintypes
-from typing import Any, Optional, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ HWND_TOPMOST = -1
 
 def apply_window_stealth(window_title: str) -> None:
     """Arranca barra de título, bordas e transforma em ToolWindow via Win32."""
-    if os_name() != "nt":
+    if os_name() != "nt" or user32 is None:
         return
 
     try:
@@ -119,11 +119,7 @@ def force_topmost(window_title: str) -> None:
             0,
             0,
             0,
-            SWP_NOMOVE
-            | SWP_NOSIZE
-            | SWP_NOACTIVATE
-            | SWP_NOOWNERZORDER
-            | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
         )
     except Exception as e:
         logger.warning(f"Win32: Falha ao forçar topmost em '{window_title}': {e}")
@@ -164,7 +160,7 @@ def get_monitors_info() -> list[dict[str, Any]]:
     if os_name() != "nt":
         return []
 
-    monitors = []
+    monitors: list[dict[str, Any]] = []
     user32 = ctypes.windll.user32
 
     monitor_enum_proc = ctypes.WINFUNCTYPE(
@@ -175,7 +171,7 @@ def get_monitors_info() -> list[dict[str, Any]]:
         wintypes.LPARAM,
     )
 
-    def _callback(hMonitor, _hdc, _rect, _lparam):
+    def _callback(hMonitor: int, _hdc: int, _rect: Any, _lparam: int) -> bool:
         info = _MonitorInfo()
         info.cbSize = ctypes.sizeof(_MonitorInfo)
         if user32.GetMonitorInfoW(hMonitor, ctypes.byref(info)):
@@ -201,6 +197,32 @@ def get_monitors_info() -> list[dict[str, Any]]:
     callback = monitor_enum_proc(_callback)
     user32.EnumDisplayMonitors(0, 0, callback, 0)
     return monitors
+
+
+MB_OK = 0x00000000
+MB_YESNO = 0x00000004
+MB_ICONINFORMATION = 0x00000040
+MB_ICONQUESTION = 0x00000020
+MB_ICONWARNING = 0x00000030
+IDYES = 6
+
+
+def confirm_dialog(title: str, message: str, *, warning: bool = False) -> bool:
+    """Exibe um diálogo nativo Sim/Não e retorna True se o usuário confirmar."""
+    if os_name() != "nt":
+        return False
+
+    icon = MB_ICONWARNING if warning else MB_ICONQUESTION
+    result = ctypes.windll.user32.MessageBoxW(None, message, title, MB_YESNO | icon)
+    return bool(result == IDYES)
+
+
+def info_dialog(title: str, message: str) -> None:
+    """Exibe um diálogo nativo informativo (apenas OK)."""
+    if os_name() != "nt":
+        return
+
+    ctypes.windll.user32.MessageBoxW(None, message, title, MB_OK | MB_ICONINFORMATION)
 
 
 def is_process_elevated() -> bool:
@@ -272,9 +294,7 @@ class LowLevelKeyboardHook:
 
     def __init__(self) -> None:
         self._hook_id: wintypes.HHOOK | None = None
-        self._callbacks: dict[tuple[int, int], Callable[[], None]] = (
-            {}
-        )  # (vk, mods) -> callback
+        self._callbacks: dict[tuple[int, int], Callable[[], None]] = {}  # (vk, mods) -> callback
         self._lock = threading.Lock()
 
     def _key_proc(self, nCode: int, wParam: int, lParam: int) -> int:
@@ -284,9 +304,7 @@ class LowLevelKeyboardHook:
         try:
             if nCode >= 0 and (wParam == self.WM_KEYDOWN or wParam == self.WM_KEYUP):
                 # Cast lParam to KBDLLHOOKSTRUCT pointer
-                kb_struct = ctypes.cast(
-                    lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)
-                ).contents
+                kb_struct = ctypes.cast(lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)).contents
                 vk_code = kb_struct.vkCode
                 flags = kb_struct.flags
 
@@ -300,9 +318,9 @@ class LowLevelKeyboardHook:
         except Exception as e:
             logger.error(f"Error in keyboard hook: {e}")
 
-        return user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
+        return int(user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam))
 
-    def _check_hotkey(self, vk: int, user32) -> None:
+    def _check_hotkey(self, vk: int, user32: ctypes.WinDLL) -> None:
         """Check if current key combination matches a registered hotkey."""
         MOD_CONTROL = 0x0002
         MOD_SHIFT = 0x0004
@@ -313,27 +331,19 @@ class LowLevelKeyboardHook:
         mods = 0
 
         # Check for Ctrl (both left and right)
-        if (user32.GetAsyncKeyState(0xA2) & 0x8000) or (
-            user32.GetAsyncKeyState(0xA3) & 0x8000
-        ):
+        if (user32.GetAsyncKeyState(0xA2) & 0x8000) or (user32.GetAsyncKeyState(0xA3) & 0x8000):
             mods |= MOD_CONTROL
 
         # Check for Shift (both left and right)
-        if (user32.GetAsyncKeyState(0xA0) & 0x8000) or (
-            user32.GetAsyncKeyState(0xA1) & 0x8000
-        ):
+        if (user32.GetAsyncKeyState(0xA0) & 0x8000) or (user32.GetAsyncKeyState(0xA1) & 0x8000):
             mods |= MOD_SHIFT
 
         # Check for Alt (both left and right)
-        if (user32.GetAsyncKeyState(0xA4) & 0x8000) or (
-            user32.GetAsyncKeyState(0xA5) & 0x8000
-        ):
+        if (user32.GetAsyncKeyState(0xA4) & 0x8000) or (user32.GetAsyncKeyState(0xA5) & 0x8000):
             mods |= MOD_ALT
 
         # Check for Windows key (left and right)
-        if (user32.GetAsyncKeyState(0x5B) & 0x8000) or (
-            user32.GetAsyncKeyState(0x5C) & 0x8000
-        ):
+        if (user32.GetAsyncKeyState(0x5B) & 0x8000) or (user32.GetAsyncKeyState(0x5C) & 0x8000):
             mods |= MOD_WIN
 
         with self._lock:
@@ -399,9 +409,7 @@ class LowLevelKeyboardHook:
                 )
                 return False
 
-            logger.info(
-                f"Low-level keyboard hook installed successfully (hook_id={self._hook_id})"
-            )
+            logger.info(f"Low-level keyboard hook installed successfully (hook_id={self._hook_id})")
             return True
 
         except Exception as e:
@@ -421,9 +429,7 @@ class LowLevelKeyboardHook:
                     logger.info("Low-level keyboard hook stopped")
                 else:
                     error_code = ctypes.get_last_error()
-                    logger.error(
-                        f"Failed to unhook keyboard hook (error code: {error_code})"
-                    )
+                    logger.error(f"Failed to unhook keyboard hook (error code: {error_code})")
                 self._hook_id = None
         except Exception as e:
             logger.error(f"Error stopping keyboard hook: {e}")

@@ -21,10 +21,14 @@ class SystemTrayManager:
         on_exit_callback: Callable[[], Any],
         on_open_settings: Callable[[], Any],
         on_reload_hotkeys: Callable[[], Any],
+        on_configure_spotify: Callable[[], Any],
+        is_spotify_integration_enabled: Callable[[], bool],
     ) -> None:
         self.on_exit_callback = on_exit_callback
         self.on_open_settings = on_open_settings
         self.on_reload_hotkeys = on_reload_hotkeys
+        self.on_configure_spotify = on_configure_spotify
+        self.is_spotify_integration_enabled = is_spotify_integration_enabled
         self.icon: pystray.Icon | None = None
 
     def _open_settings(self) -> None:
@@ -47,6 +51,12 @@ class SystemTrayManager:
         logger.info("Solicitando recarregamento de atalhos...")
         if self.on_reload_hotkeys is not None:
             self.on_reload_hotkeys()
+
+    def _configure_spotify(self) -> None:
+        """Dispara a checagem/aplicação da integração com Spotify (Spicetify)."""
+        logger.info("Solicitando configuração da integração com Spotify...")
+        if self.on_configure_spotify is not None:
+            self.on_configure_spotify()
 
     def _create_placeholder_icon(self) -> Image.Image:
         """Cria um ícone simples para a bandeja."""
@@ -88,6 +98,11 @@ class SystemTrayManager:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Configurações", lambda icon, item: self._open_settings()),
             pystray.MenuItem("Recarregar Atalhos", lambda icon, item: self._reload_hotkeys()),
+            pystray.MenuItem(
+                "Configurar Spotify",
+                lambda icon, item: self._configure_spotify(),
+                visible=lambda item: self.is_spotify_integration_enabled(),
+            ),
             pystray.MenuItem("Sair", self._on_exit_click),
         )
 
@@ -117,3 +132,8 @@ class SystemTrayManager:
         """Interrompe o ícone da bandeja, se estiver ativo."""
         if self.icon is not None:
             self.icon.stop()
+
+    def refresh_menu(self) -> None:
+        """Força a releitura das propriedades dinâmicas do menu (ex.: visibilidade)."""
+        if self.icon is not None:
+            self.icon.update_menu()
