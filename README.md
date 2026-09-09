@@ -85,8 +85,9 @@ O WyrmPlayerControl também funciona com o cliente desktop do Spotify, via [Spic
 
 Pré-requisitos:
 
-1. [Spicetify](https://spicetify.app) instalado.
-2. `websocket_port` em `settings.json` configurado como `8974` (padrão) — a extensão do Spicetify conecta nessa porta fixa e não permite alterá-la.
+1. Spotify instalado via **instalador oficial** ([spotify.com/download](https://www.spotify.com/download)) — a versão da **Microsoft Store não é compatível** com o Spicetify (o app roda em sandbox e não pode ser modificado). O WyrmPlayerControl detecta e avisa se identificar a versão da Store.
+2. [Spicetify](https://spicetify.app) instalado.
+3. `websocket_port` em `settings.json` configurado como `8974` (padrão) — a extensão do Spicetify conecta nessa porta fixa e não permite alterá-la.
 
 Passos:
 

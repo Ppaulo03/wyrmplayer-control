@@ -68,6 +68,7 @@ Pontos de desacoplamento a preservar:
 - **Estado compartilhado (`AppState`) usa observer assíncrono** (`on_update`/`notify`), não signals/eventos do Flet. Novas partes da UI que precisam reagir a mudanças devem se registrar via `state.on_update`.
 - **`websocket_port` default é `8974`**, não mude sem necessidade forte: é a porta fixa (não configurável) esperada tanto pela extensão de navegador quanto pela extensão `webnowplaying.js` do Spicetify.
 - **Integração com Spotify (`services/spotify_setup.py`) só faz auto-config segura**: no startup, se `spotify_integration` estiver true, só roda `spicetify config extensions` (não reinicia o Spotify). Rodar `spicetify apply` (que reinicia o cliente) exige clique explícito no item "Configurar Spotify" da tray + confirmação via `win32.confirm_dialog`. Não automatize esse último passo sem repensar — é uma ação com efeito colateral visível pro usuário (fecha/reabre o Spotify).
+- **Spotify via Microsoft Store não é compatível com Spicetify** (app em sandbox, não pode ser modificado). `spotify_setup.is_spotify_microsoft_store()` detecta isso checando `%LOCALAPPDATA%\Packages\SpotifyAB.SpotifyMusic_*` — sem essa checagem, `spicetify config`/`apply` falham silenciosamente (retornam código != 0) sem explicar o motivo real ao usuário.
 
 ## Comandos úteis
 

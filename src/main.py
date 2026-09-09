@@ -53,6 +53,15 @@ def _handle_configure_spotify() -> None:
     cfg = cfg_manager.load()
     status = spotify_setup.check_status(cfg.websocket_port)
 
+    if status.spotify_is_microsoft_store:
+        win32.info_dialog(
+            "Spotify",
+            "O Spotify instalado é a versão da Microsoft Store, que não é compatível "
+            "com o Spicetify. Desinstale-a e instale a versão oficial em "
+            "https://www.spotify.com/download para usar a integração.",
+        )
+        return
+
     if status.spicetify_path is None:
         win32.info_dialog(
             "Spotify",
