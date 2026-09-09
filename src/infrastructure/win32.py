@@ -269,7 +269,7 @@ def run_command_unelevated(
         f"$Action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c \"{bat_path}\"'\r\n"
         "$Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date)\r\n"
         "$Principal = New-ScheduledTaskPrincipal "
-        '-UserId "$env:USERDOMAIN\\$env:USERNAME" -RunLevel Limited\r\n'
+        '-UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType S4U -RunLevel Limited\r\n'
         f"Register-ScheduledTask -TaskName '{task_name}' -Action $Action -Trigger $Trigger "
         "-Principal $Principal -Force | Out-Null\r\n"
         f"Start-ScheduledTask -TaskName '{task_name}'\r\n",
@@ -300,7 +300,21 @@ def run_command_unelevated(
         deadline = time.monotonic() + timeout
         while not exitcode_path.exists():
             if time.monotonic() > deadline:
-                raise RuntimeError("Execução sem privilégios administrativos não terminou a tempo.")
+                partial_stdout = (
+                    stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+                    if stdout_path.exists()
+                    else ""
+                )
+                partial_stderr = (
+                    stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+                    if stderr_path.exists()
+                    else ""
+                )
+                raise RuntimeError(
+                    "Execução sem privilégios administrativos não terminou a tempo "
+                    f"({timeout:.0f}s). stdout parcial: {partial_stdout!r} | "
+                    f"stderr parcial: {partial_stderr!r}"
+                )
             time.sleep(0.3)
 
         try:
