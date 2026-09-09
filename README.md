@@ -35,10 +35,10 @@ Principais capacidades:
 
 ```text
 music_controller/
-  main.py
   settings.json
   WyrmPlayerControl.spec
   src/
+    main.py
     core/
       config.py
       display.py
@@ -62,7 +62,7 @@ Resumo dos módulos:
 5. src/ui/hud.py: overlay visual responsivo e temporário.
 6. src/ui/settings.py: janela de configurações com autosave.
 7. src/ui/tray.py: menu da system tray e ações de ciclo de vida.
-8. main.py: orquestra inicialização, singleton, logging e execução.
+8. src/main.py: orquestra inicialização, singleton, logging e execução.
 
 ## Configuração do Navegador
 
@@ -79,6 +79,23 @@ No Brave, adicione exceção para localhost:
 
 3. Salve e reinicie o navegador.
 
+## Integração com Spotify (Spicetify)
+
+O WyrmPlayerControl também funciona com o cliente desktop do Spotify, via [Spicetify](https://spicetify.app) e a extensão `webnowplaying.js` (que já vem embutida na instalação do Spicetify).
+
+Pré-requisitos:
+
+1. [Spicetify](https://spicetify.app) instalado.
+2. `websocket_port` em `settings.json` configurado como `8974` (padrão) — a extensão do Spicetify conecta nessa porta fixa e não permite alterá-la.
+
+Passos:
+
+1. Ative "Integração com Spotify (Spicetify)" na aba **Geral** das configurações (ou defina `"spotify_integration": true` no `settings.json`).
+2. Reinicie o WyrmPlayerControl. Se o Spicetify já estiver instalado, a extensão é registrada automaticamente (sem reiniciar o Spotify).
+3. Abra o menu da system tray e clique em **Configurar Spotify**. Isso confirma com você antes de rodar `spicetify apply`, que reinicia o cliente do Spotify para aplicar a integração.
+
+Se o Spicetify não estiver instalado, o app não o instala sozinho — a mensagem no log (e no diálogo da tray) aponta para a instalação manual em https://spicetify.app.
+
 ## Arquivo de Configuração
 
 O arquivo settings.json é criado automaticamente se não existir.
@@ -87,12 +104,14 @@ Campos principais:
 
 1. volume_step: passo de ajuste de volume.
 2. hud_display_time: duração do HUD em segundos.
-3. hud_monitor: índice do monitor onde o HUD aparece.
-4. hud_position: preset de posição do HUD.
-5. log_level: nível de logging (DEBUG/INFO/WARNING/ERROR/CRITICAL).
-6. log_file: nome ou caminho do arquivo de log.
-7. hotkeys: mapa de comandos para atalhos.
-8. triggers: quando o HUD deve aparecer (volume/metadata/playback).
+3. websocket_port: porta do servidor WebSocket local (padrão 8974 — não mude se for usar a integração com Spotify, veja abaixo).
+4. hud_monitor: índice do monitor onde o HUD aparece.
+5. hud_position: preset de posição do HUD.
+6. log_level: nível de logging (DEBUG/INFO/WARNING/ERROR/CRITICAL).
+7. log_file: nome ou caminho do arquivo de log.
+8. hotkeys: mapa de comandos para atalhos.
+9. triggers: quando o HUD deve aparecer (volume/metadata/playback).
+10. spotify_integration: habilita a checagem/configuração automática da integração com Spotify via Spicetify (veja abaixo).
 
 Exemplo:
 
@@ -100,6 +119,7 @@ Exemplo:
 {
   "volume_step": 5,
   "hud_display_time": 3,
+  "websocket_port": 8974,
   "hud_monitor": 0,
   "hud_position": "bottom_right",
   "log_level": "INFO",
@@ -116,7 +136,8 @@ Exemplo:
     "volume": true,
     "metadata": true,
     "playback": true
-  }
+  },
+  "spotify_integration": false
 }
 ```
 
@@ -131,7 +152,7 @@ uv sync
 2. Rode o app:
 
 ```bash
-uv run main.py
+uv run python src/main.py
 ```
 
 3. Rode apenas a tela de configurações (opcional):
