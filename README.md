@@ -116,6 +116,7 @@ Campos principais:
 9. triggers: quando o HUD deve aparecer (volume/metadata/playback).
 10. spotify_integration: habilita a checagem/configuração automática da integração com Spotify via Spicetify (veja abaixo).
 11. start_with_windows: registra (ou remove) o app em `HKCU\...\Run` para iniciar junto com o Windows.
+12. start_with_windows_elevated: se true, inicia elevado (pede confirmação do UAC a cada login) para garantir os atalhos sobre janelas/jogos que também rodam elevados. Só tem efeito com start_with_windows ativo.
 
 Exemplo:
 
@@ -142,7 +143,8 @@ Exemplo:
     "playback": true
   },
   "spotify_integration": false,
-  "start_with_windows": false
+  "start_with_windows": false,
+  "start_with_windows_elevated": false
 }
 ```
 
@@ -185,7 +187,7 @@ Saída esperada:
 2. Janela de configurações abre em modo dedicado (--settings) sem conflitar com o singleton.
 3. Logging dinâmico: mudanças de log_level, log_file e websocket_port são aplicadas em runtime (sem precisar reiniciar).
 4. Encerramento via tray com limpeza de tarefas e finalização do processo.
-5. Ao iniciar com o Windows, o app abre **sem elevar** (`--no-admin-relaunch`), para não pedir confirmação de administrador a cada login. Isso significa que os atalhos globais podem não funcionar sobre janelas de jogos elevados até você reabrir o app manualmente (aí sim ele eleva normalmente).
+5. Ao iniciar com o Windows, por padrão o app abre **sem elevar** (`--no-admin-relaunch`), para não pedir confirmação de administrador a cada login. Isso significa que os atalhos globais podem não funcionar sobre janelas de jogos elevados até você reabrir o app manualmente (aí sim ele eleva normalmente). Se isso for um problema no seu caso, ative "Iniciar elevado" na aba Geral — o app passa a pedir UAC a cada login, mas os atalhos funcionam mesmo sobre janelas elevadas.
 
 ## Troubleshooting
 

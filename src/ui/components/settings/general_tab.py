@@ -123,10 +123,30 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
     )
     _refresh_spotify_status()
 
+    start_with_windows_elevated = ft.Switch(
+        label="Iniciar elevado (garante atalhos sobre janelas/jogos elevados)",
+        value=cfg.start_with_windows_elevated,
+        on_change=on_change,
+        visible=cfg.start_with_windows,
+    )
+    start_with_windows_hint = ft.Text(
+        "Por padrão, inicia sem pedir confirmação de administrador (UAC) a cada "
+        "login. Se os atalhos não funcionarem sobre um jogo específico que também "
+        "roda elevado, ative a opção abaixo.",
+        size=12,
+        color=ft.Colors.WHITE60,
+        visible=cfg.start_with_windows,
+    )
+
+    def _on_start_with_windows_toggle(e: Any) -> None:
+        start_with_windows_elevated.visible = start_with_windows.value
+        start_with_windows_hint.visible = start_with_windows.value
+        on_change(e)
+
     start_with_windows = ft.Switch(
         label="Iniciar com o Windows",
         value=cfg.start_with_windows,
-        on_change=on_change,
+        on_change=_on_start_with_windows_toggle,
     )
 
     card = ft.Container(
@@ -138,6 +158,8 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
             [
                 ft.Text("Ajustes Gerais", size=24, weight=ft.FontWeight.BOLD),
                 start_with_windows,
+                start_with_windows_hint,
+                start_with_windows_elevated,
                 ft.Text("Passo do volume (%)", size=13, color=ft.Colors.WHITE70),
                 volume_step,
                 ft.Text("Tempo do HUD (segundos)", size=13, color=ft.Colors.WHITE70),
@@ -177,6 +199,7 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
         "websocket_port": websocket_port,
         "spotify_integration": spotify_integration,
         "start_with_windows": start_with_windows,
+        "start_with_windows_elevated": start_with_windows_elevated,
     }
 
     return card
