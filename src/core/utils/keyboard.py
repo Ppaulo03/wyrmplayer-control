@@ -1,5 +1,6 @@
 import flet as ft
 
+
 def normalize_key(raw_key: str) -> str:
     """Suaviza as diferenças de nomes de teclas entre Flet e o sistema operacional."""
     mapping = {
@@ -36,10 +37,14 @@ def hotkey_from_event(e: ft.KeyboardEvent) -> str:
     if e.ctrl and e.alt and not e.shift and not e.meta:
         parts.append("alt gr")
     else:
-        if e.ctrl: parts.append("ctrl")
-        if e.alt: parts.append("alt")
-        if e.shift: parts.append("shift")
-        if e.meta: parts.append("windows")
+        if e.ctrl:
+            parts.append("ctrl")
+        if e.alt:
+            parts.append("alt")
+        if e.shift:
+            parts.append("shift")
+        if e.meta:
+            parts.append("windows")
 
     parts.append(key)
     return "+".join(parts)

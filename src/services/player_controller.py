@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
 
 from src.core.config import ConfigManager
 from src.core.state import AppState, StateCategory
@@ -20,7 +19,7 @@ class PlayerController:
         state: AppState,
         config: ConfigManager,
         messenger: IMessenger,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self.state = state
         self.config = config
@@ -42,7 +41,9 @@ class PlayerController:
                 lambda: asyncio.create_task(self.state.notify(category=category))
             )
         else:
-            logger.warning("PlayerController: Tentativa de notificar UI sem loop de eventos configurado.")
+            logger.warning(
+                "PlayerController: Tentativa de notificar UI sem loop de eventos configurado."
+            )
 
     def play_pause(self) -> None:
         """Alterna entre reprodução e pausa."""

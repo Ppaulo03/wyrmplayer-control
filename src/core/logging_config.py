@@ -11,11 +11,11 @@ def resolve_log_file_path(log_file_name: str) -> str:
         return log_file_name
 
     base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__)
-    # Se estivemos em src/core, precisamos subir dois níveis para chegar na raiz se estivermos em modo dev
+    # Em modo dev, subimos dois níveis (src/core/) para chegar na raiz do projeto.
     if not getattr(sys, "frozen", False):
-         # Se este arquivo está em src/core/logging_config.py, a raiz está 2 níveis acima
-         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    
+        # Se este arquivo está em src/core/logging_config.py, a raiz está 2 níveis acima
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
     return os.path.abspath(os.path.join(base_dir, log_file_name))
 
 
@@ -48,7 +48,7 @@ def setup_initial_logging(level_name: str, log_file_name: str) -> str:
     """Initial bootstrapping of the logging system."""
     log_level = getattr(logging, level_name.upper(), logging.INFO)
     log_file_path = resolve_log_file_path(log_file_name)
-    
+
     logging.basicConfig(
         level=log_level,
         format=LOG_FORMAT,

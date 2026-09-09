@@ -1,22 +1,23 @@
+import atexit
 import ctypes
+import logging
 import os
 import tempfile
-import logging
-import atexit
-from typing import Optional
 
 logger = logging.getLogger(__name__)
+
 
 class SingleInstance:
     """
     Manager to ensure only one instance of the application is running.
     Uses Win32 Mutex on Windows and a fallback lockfile mechanism.
     """
+
     def __init__(self, app_name: str = "WyrmPlayerControl"):
         self.app_name = app_name
         self.lock_file_path = os.path.join(tempfile.gettempdir(), f"{app_name}.lock")
-        self.lock_file_handle: Optional[int] = None
-        self.mutex_handle: Optional[int] = None
+        self.lock_file_handle: int | None = None
+        self.mutex_handle: int | None = None
 
     def _is_process_running(self, pid: int) -> bool:
         if pid <= 0:
@@ -34,7 +35,9 @@ class SingleInstance:
                 return False
             try:
                 exit_code = ctypes.c_ulong()
-                if not ctypes.windll.kernel32.GetExitCodeProcess(process_handle, ctypes.byref(exit_code)):
+                if not ctypes.windll.kernel32.GetExitCodeProcess(
+                    process_handle, ctypes.byref(exit_code)
+                ):
                     return False
                 return exit_code.value == STILL_ACTIVE
             finally:
@@ -54,7 +57,7 @@ class SingleInstance:
         ERROR_ALREADY_EXISTS = 183
         mutex_name = f"Global\\{self.app_name}Singleton"
         self.mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
-        
+
         if self.mutex_handle:
             if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
                 return False
@@ -86,7 +89,9 @@ class SingleInstance:
                 return False
 
             try:
-                self.lock_file_handle = os.open(self.lock_file_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                self.lock_file_handle = os.open(
+                    self.lock_file_path, os.O_CREAT | os.O_EXCL | os.O_RDWR
+                )
             except FileExistsError:
                 return False
 

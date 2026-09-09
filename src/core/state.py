@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 class StateCategory(Enum):
     """Categorias de mudança de estado para filtragem em observadores."""
+
     METADATA = auto()
     VOLUME = auto()
     PLAYBACK = auto()
@@ -19,6 +20,7 @@ class StateCategory(Enum):
 @dataclass(frozen=True)
 class MediaMetadata:
     """Dados puros da mídia recebidos da extensão."""
+
     title: str = ""
     artist: str = ""
     album: str = ""
@@ -47,11 +49,15 @@ class AppState:
         default_factory=list, repr=False
     )
 
-    def on_update(self, callback: Callable[[bool, StateCategory], Coroutine[Any, Any, None]]) -> None:
+    def on_update(
+        self, callback: Callable[[bool, StateCategory], Coroutine[Any, Any, None]]
+    ) -> None:
         """Registra um observador para mudanças de estado."""
         self._listeners.append(callback)
 
-    async def notify(self, major: bool = False, category: StateCategory = StateCategory.ALL) -> None:
+    async def notify(
+        self, major: bool = False, category: StateCategory = StateCategory.ALL
+    ) -> None:
         """Notifica os observadores sobre mudanças no estado."""
         for callback in self._listeners:
             try:
