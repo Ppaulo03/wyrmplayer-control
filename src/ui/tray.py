@@ -30,6 +30,7 @@ class SystemTrayManager:
         self.on_configure_spotify = on_configure_spotify
         self.is_spotify_integration_enabled = is_spotify_integration_enabled
         self.icon: pystray.Icon | None = None
+        self._configuring_spotify = threading.Lock()
 
     def _open_settings(self) -> None:
         """Abre a tela de configurações em um processo separado."""
@@ -53,10 +54,29 @@ class SystemTrayManager:
             self.on_reload_hotkeys()
 
     def _configure_spotify(self) -> None:
-        """Dispara a checagem/aplicação da integração com Spotify (Spicetify)."""
+        """
+        Dispara a checagem/aplicação da integração com Spotify (Spicetify).
+
+        Roda numa thread própria: o callback do menu do pystray executa na MESMA
+        thread que bombeia as mensagens da tray, então qualquer chamada bloqueante
+        aqui (subprocess, MessageBoxW) travaria o ícone inteiro até terminar.
+        """
+        if self.on_configure_spotify is None:
+            return
+
+        if not self._configuring_spotify.acquire(blocking=False):
+            logger.info("Spotify setup: já em andamento, ignorando clique adicional.")
+            return
+
         logger.info("Solicitando configuração da integração com Spotify...")
-        if self.on_configure_spotify is not None:
-            self.on_configure_spotify()
+
+        def _run() -> None:
+            try:
+                self.on_configure_spotify()
+            finally:
+                self._configuring_spotify.release()
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _create_placeholder_icon(self) -> Image.Image:
         """Cria um ícone simples para a bandeja."""
