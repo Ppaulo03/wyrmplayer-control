@@ -97,7 +97,7 @@ Passos:
 
 Se o Spicetify não estiver instalado, o app não o instala sozinho — a mensagem no log (e no diálogo da tray) aponta para a instalação manual em https://spicetify.app.
 
-**Nota sobre execução como administrador**: como o WyrmPlayerControl normalmente roda elevado (necessário para os atalhos globais), e o Spicetify se recusa a configurar/aplicar extensões nesse modo (risco real de o Spotify ficar com tela em branco), o item "Configurar Spotify" da tray pede uma confirmação extra explicando esse risco antes de usar a flag `--bypass-admin` do Spicetify. Se preferir não arriscar, feche o WyrmPlayerControl e rode `spicetify config extensions webnowplaying.js` e `spicetify apply` manualmente num terminal sem privilégios de administrador.
+**Nota sobre execução como administrador**: como o WyrmPlayerControl normalmente roda elevado (necessário para os atalhos globais), e o Spicetify se recusa a configurar/aplicar extensões nesse modo, o app detecta isso e roda o Spicetify de verdade sem privilégios administrativos (via uma tarefa agendada temporária), sem precisar de nenhuma ação manual sua nem aceitar riscos.
 
 ## Arquivo de Configuração
 
