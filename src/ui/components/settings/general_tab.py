@@ -123,6 +123,12 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
     )
     _refresh_spotify_status()
 
+    start_with_windows = ft.Switch(
+        label="Iniciar com o Windows",
+        value=cfg.start_with_windows,
+        on_change=on_change,
+    )
+
     card = ft.Container(
         padding=16,
         border_radius=14,
@@ -131,6 +137,7 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
         content=ft.Column(
             [
                 ft.Text("Ajustes Gerais", size=24, weight=ft.FontWeight.BOLD),
+                start_with_windows,
                 ft.Text("Passo do volume (%)", size=13, color=ft.Colors.WHITE70),
                 volume_step,
                 ft.Text("Tempo do HUD (segundos)", size=13, color=ft.Colors.WHITE70),
@@ -169,6 +176,7 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
         "log_file": log_file,
         "websocket_port": websocket_port,
         "spotify_integration": spotify_integration,
+        "start_with_windows": start_with_windows,
     }
 
     return card
