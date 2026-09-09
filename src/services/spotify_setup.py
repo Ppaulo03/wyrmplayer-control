@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.infrastructure import win32
+
 logger = logging.getLogger(__name__)
 
 WEBNOWPLAYING_EXTENSION = "webnowplaying.js"
@@ -123,11 +125,22 @@ def check_status(websocket_port: int) -> SpotifySetupStatus:
     )
 
 
-def configure_extension(spicetify_path: Path) -> bool:
-    """Registra webnowplaying.js no config do Spicetify. Não reinicia o Spotify."""
+def configure_extension(spicetify_path: Path, *, bypass_admin: bool = False) -> bool:
+    """
+    Registra webnowplaying.js no config do Spicetify. Não reinicia o Spotify.
+
+    O Spicetify se recusa a rodar enquanto elevado (risco de o Spotify, que roda
+    como usuário normal, ficar com tela em branco por não acessar arquivos
+    modificados por um processo admin). `bypass_admin` só deve ser True após
+    consentimento explícito do usuário (ver `win32.confirm_dialog` no chamador).
+    """
+    command = [str(spicetify_path), "config", "extensions", WEBNOWPLAYING_EXTENSION]
+    if bypass_admin:
+        command.append("--bypass-admin")
+
     try:
         result = subprocess.run(
-            [str(spicetify_path), "config", "extensions", WEBNOWPLAYING_EXTENSION],
+            command,
             capture_output=True,
             text=True,
             timeout=30,
@@ -151,11 +164,19 @@ def configure_extension(spicetify_path: Path) -> bool:
     return True
 
 
-def apply_changes(spicetify_path: Path) -> bool:
-    """Roda 'spicetify apply'. Reinicia o cliente do Spotify para aplicar as mudanças."""
+def apply_changes(spicetify_path: Path, *, bypass_admin: bool = False) -> bool:
+    """
+    Roda 'spicetify apply'. Reinicia o cliente do Spotify para aplicar as mudanças.
+
+    Ver nota sobre `bypass_admin` em `configure_extension`.
+    """
+    command = [str(spicetify_path), "apply"]
+    if bypass_admin:
+        command.append("--bypass-admin")
+
     try:
         result = subprocess.run(
-            [str(spicetify_path), "apply"],
+            command,
             capture_output=True,
             text=True,
             timeout=60,
@@ -214,6 +235,17 @@ def run_startup_check(websocket_port: int) -> SpotifySetupStatus:
     if status.extension_enabled:
         logger.info(
             "Spotify setup: extensão %s já habilitada no Spicetify.", WEBNOWPLAYING_EXTENSION
+        )
+        return status
+
+    if win32.is_process_elevated():
+        logger.warning(
+            "Spotify setup: WyrmPlayerControl está rodando como administrador. O Spicetify "
+            "se recusa a configurar/aplicar extensões nesse modo (risco de Spotify ficar "
+            "com tela em branco). Use o item 'Configurar Spotify' na system tray, que pede "
+            "confirmação explícita antes de contornar essa proteção, ou rode "
+            "'spicetify config extensions webnowplaying.js' manualmente num terminal sem "
+            "privilégios de administrador."
         )
         return status
 
