@@ -102,8 +102,10 @@ def test_is_spotify_microsoft_store_false_when_absent(monkeypatch, tmp_path: Pat
     assert spotify_setup.is_spotify_microsoft_store() is False
 
 
-def test_run_startup_check_skips_configure_when_elevated(monkeypatch, tmp_path: Path) -> None:
-    """Nunca chama configure_extension sem consentimento explícito enquanto elevado."""
+def test_run_startup_check_configures_without_admin_when_elevated(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Quando elevado, configura mesmo assim, mas sempre pedindo avoid_admin=True."""
     fake_spicetify = tmp_path / "spicetify.exe"
     fake_spicetify.touch()
     config_path = tmp_path / "config-xpui.ini"
@@ -115,11 +117,16 @@ def test_run_startup_check_skips_configure_when_elevated(monkeypatch, tmp_path: 
     monkeypatch.setattr(spotify_setup, "get_spicetify_config_path", lambda: config_path)
     monkeypatch.setattr(spotify_setup.win32, "is_process_elevated", lambda: True)
 
-    def _fail_if_called(*_args: object, **_kwargs: object) -> bool:
-        raise AssertionError("configure_extension não deveria ser chamado quando elevado")
+    calls: list[bool] = []
 
-    monkeypatch.setattr(spotify_setup, "configure_extension", _fail_if_called)
+    def _record_call(_path: Path, *, avoid_admin: bool) -> bool:
+        calls.append(avoid_admin)
+        return True
+
+    monkeypatch.setattr(spotify_setup, "configure_extension", _record_call)
 
     status = spotify_setup.run_startup_check(websocket_port=spotify_setup.WEBNOWPLAYING_PORT)
+
+    assert calls == [True]
 
     assert status.extension_enabled is False

@@ -1,10 +1,16 @@
 import ctypes
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
+import time
+import uuid
 from collections.abc import Callable
 from ctypes import wintypes
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -223,6 +229,118 @@ def info_dialog(title: str, message: str) -> None:
         return
 
     ctypes.windll.user32.MessageBoxW(None, message, title, MB_OK | MB_ICONINFORMATION)
+
+
+def run_command_unelevated(
+    command: list[str], timeout: float = 60.0
+) -> subprocess.CompletedProcess[str]:
+    """
+    Executa um comando sem privilégios administrativos, mesmo com o processo atual
+    elevado, usando uma tarefa agendada temporária com nível 'Limited' (a mesma
+    técnica usada por diversas ferramentas de-elevação no Windows).
+
+    Levanta RuntimeError se não for possível agendar/rodar a tarefa ou recuperar o
+    resultado a tempo.
+    """
+    if os_name() != "nt":
+        raise RuntimeError("run_command_unelevated só é suportado no Windows.")
+
+    task_name = f"WyrmPlayerControl_Unelevated_{uuid.uuid4().hex}"
+    work_dir = Path(tempfile.mkdtemp(prefix="wyrmplayer_unelevated_"))
+    stdout_path = work_dir / "stdout.txt"
+    stderr_path = work_dir / "stderr.txt"
+    exitcode_path = work_dir / "exitcode.txt"
+    bat_path = work_dir / "run.bat"
+    schedule_ps1_path = work_dir / "schedule.ps1"
+
+    quoted_command = subprocess.list2cmdline(command)
+    bat_path.write_text(
+        "@echo off\r\n"
+        # Evita saída ilegível: sem isso, texto redirecionado usa a codepage OEM do
+        # console (ex.: cp850), não UTF-8, e acentos viram bytes inválidos.
+        "chcp 65001 >nul\r\n"
+        f'{quoted_command} > "{stdout_path}" 2> "{stderr_path}"\r\n'
+        f'echo %errorlevel% > "{exitcode_path}"\r\n',
+        encoding="utf-8",
+    )
+
+    schedule_ps1_path.write_text(
+        "$ErrorActionPreference = 'Stop'\r\n"
+        f"$Action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c \"{bat_path}\"'\r\n"
+        "$Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date)\r\n"
+        "$Principal = New-ScheduledTaskPrincipal "
+        '-UserId "$env:USERDOMAIN\\$env:USERNAME" -RunLevel Limited\r\n'
+        f"Register-ScheduledTask -TaskName '{task_name}' -Action $Action -Trigger $Trigger "
+        "-Principal $Principal -Force | Out-Null\r\n"
+        f"Start-ScheduledTask -TaskName '{task_name}'\r\n",
+        encoding="utf-8",
+    )
+
+    try:
+        schedule_result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(schedule_ps1_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if schedule_result.returncode != 0:
+            raise RuntimeError(
+                "Falha ao agendar execução sem privilégios administrativos: "
+                f"{schedule_result.stdout.strip()} {schedule_result.stderr.strip()}"
+            )
+
+        deadline = time.monotonic() + timeout
+        while not exitcode_path.exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("Execução sem privilégios administrativos não terminou a tempo.")
+            time.sleep(0.3)
+
+        try:
+            returncode = int(exitcode_path.read_text(encoding="utf-8", errors="replace").strip())
+        except ValueError:
+            returncode = -1
+
+        stdout_text = (
+            stdout_path.read_text(encoding="utf-8", errors="replace")
+            if stdout_path.exists()
+            else ""
+        )
+        stderr_text = (
+            stderr_path.read_text(encoding="utf-8", errors="replace")
+            if stderr_path.exists()
+            else ""
+        )
+        return subprocess.CompletedProcess(command, returncode, stdout_text, stderr_text)
+    finally:
+        cleanup_ps1_path = work_dir / "cleanup.ps1"
+        cleanup_ps1_path.write_text(
+            f"Unregister-ScheduledTask -TaskName '{task_name}' -Confirm:$false "
+            "-ErrorAction SilentlyContinue\r\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(cleanup_ps1_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def is_process_elevated() -> bool:

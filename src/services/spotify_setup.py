@@ -125,28 +125,35 @@ def check_status(websocket_port: int) -> SpotifySetupStatus:
     )
 
 
-def configure_extension(spicetify_path: Path, *, bypass_admin: bool = False) -> bool:
+def _run_spicetify(
+    command: list[str], *, avoid_admin: bool, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """
+    Roda um comando do Spicetify, sem privilégios administrativos de verdade quando
+    `avoid_admin` é True — nunca usa a flag `--bypass-admin` do Spicetify, que só
+    ignora o aviso e mantém o comando rodando elevado (com o risco real que o
+    próprio Spicetify descreve).
+    """
+    if avoid_admin:
+        return win32.run_command_unelevated(command, timeout=timeout)
+    return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def configure_extension(spicetify_path: Path, *, avoid_admin: bool = False) -> bool:
     """
     Registra webnowplaying.js no config do Spicetify. Não reinicia o Spotify.
 
     O Spicetify se recusa a rodar enquanto elevado (risco de o Spotify, que roda
     como usuário normal, ficar com tela em branco por não acessar arquivos
-    modificados por um processo admin). `bypass_admin` só deve ser True após
-    consentimento explícito do usuário (ver `win32.confirm_dialog` no chamador).
+    modificados por um processo admin). Passe `avoid_admin=True` quando o processo
+    atual estiver elevado — o comando roda de fato sem privilégios administrativos
+    via `win32.run_command_unelevated`.
     """
     command = [str(spicetify_path), "config", "extensions", WEBNOWPLAYING_EXTENSION]
-    if bypass_admin:
-        command.append("--bypass-admin")
 
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
+        result = _run_spicetify(command, avoid_admin=avoid_admin, timeout=30)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as e:
         logger.error("Spotify setup: falha ao rodar 'spicetify config extensions': %s", e)
         return False
 
@@ -164,25 +171,17 @@ def configure_extension(spicetify_path: Path, *, bypass_admin: bool = False) -> 
     return True
 
 
-def apply_changes(spicetify_path: Path, *, bypass_admin: bool = False) -> bool:
+def apply_changes(spicetify_path: Path, *, avoid_admin: bool = False) -> bool:
     """
     Roda 'spicetify apply'. Reinicia o cliente do Spotify para aplicar as mudanças.
 
-    Ver nota sobre `bypass_admin` em `configure_extension`.
+    Ver nota sobre `avoid_admin` em `configure_extension`.
     """
     command = [str(spicetify_path), "apply"]
-    if bypass_admin:
-        command.append("--bypass-admin")
 
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
+        result = _run_spicetify(command, avoid_admin=avoid_admin, timeout=60)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as e:
         logger.error("Spotify setup: falha ao rodar 'spicetify apply': %s", e)
         return False
 
@@ -238,18 +237,14 @@ def run_startup_check(websocket_port: int) -> SpotifySetupStatus:
         )
         return status
 
-    if win32.is_process_elevated():
-        logger.warning(
-            "Spotify setup: WyrmPlayerControl está rodando como administrador. O Spicetify "
-            "se recusa a configurar/aplicar extensões nesse modo (risco de Spotify ficar "
-            "com tela em branco). Use o item 'Configurar Spotify' na system tray, que pede "
-            "confirmação explícita antes de contornar essa proteção, ou rode "
-            "'spicetify config extensions webnowplaying.js' manualmente num terminal sem "
-            "privilégios de administrador."
+    avoid_admin = win32.is_process_elevated()
+    if avoid_admin:
+        logger.info(
+            "Spotify setup: WyrmPlayerControl está rodando como administrador; o Spicetify "
+            "será configurado sem privilégios administrativos (tarefa agendada temporária)."
         )
-        return status
 
-    if configure_extension(status.spicetify_path):
+    if configure_extension(status.spicetify_path, avoid_admin=avoid_admin):
         logger.info(
             "Spotify setup: extensão configurada, mas ainda não aplicada. Use o item "
             "'Configurar Spotify' na system tray para aplicar (isso reinicia o Spotify)."

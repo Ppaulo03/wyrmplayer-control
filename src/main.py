@@ -79,29 +79,15 @@ def _handle_configure_spotify() -> None:
         )
         return
 
-    bypass_admin = False
-    if win32.is_process_elevated():
-        proceed_elevated = win32.confirm_dialog(
-            "Spotify",
-            "O WyrmPlayerControl está rodando como administrador. O Spicetify recomenda "
-            "não configurar/aplicar extensões nesse modo: o Spotify roda como usuário "
-            "normal e pode ficar com a tela em branco se não conseguir acessar arquivos "
-            "modificados por um processo elevado. Continuar mesmo assim?",
-            warning=True,
+    avoid_admin = win32.is_process_elevated()
+    if avoid_admin:
+        logger.info(
+            "Spotify setup: WyrmPlayerControl está rodando como administrador; o Spicetify "
+            "será rodado sem privilégios administrativos (tarefa agendada temporária)."
         )
-        if not proceed_elevated:
-            logger.info("Spotify setup: usuário optou por não continuar rodando como admin.")
-            win32.info_dialog(
-                "Spotify",
-                "Configuração cancelada. Para configurar com segurança, feche o "
-                "WyrmPlayerControl, abra um terminal comum (sem administrador) e rode:\n\n"
-                "spicetify config extensions webnowplaying.js\nspicetify apply",
-            )
-            return
-        bypass_admin = True
 
     if not status.extension_enabled and not spotify_setup.configure_extension(
-        status.spicetify_path, bypass_admin=bypass_admin
+        status.spicetify_path, avoid_admin=avoid_admin
     ):
         win32.info_dialog("Spotify", "Falha ao configurar a extensão. Veja o log para detalhes.")
         return
@@ -113,9 +99,14 @@ def _handle_configure_spotify() -> None:
     )
     if not proceed:
         logger.info("Spotify setup: usuário cancelou a aplicação (spicetify apply).")
+        win32.info_dialog(
+            "Spotify",
+            "Configuração cancelada. A extensão já está registrada no Spicetify; "
+            "aplique quando quiser clicando novamente em 'Configurar Spotify' na tray.",
+        )
         return
 
-    if spotify_setup.apply_changes(status.spicetify_path, bypass_admin=bypass_admin):
+    if spotify_setup.apply_changes(status.spicetify_path, avoid_admin=avoid_admin):
         win32.info_dialog("Spotify", "Integração aplicada com sucesso.")
     else:
         win32.info_dialog("Spotify", "Falha ao aplicar as mudanças. Veja o log para detalhes.")
