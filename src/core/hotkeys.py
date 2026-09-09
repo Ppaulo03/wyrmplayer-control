@@ -76,6 +76,7 @@ class HotkeyManager:
             "right": 0x27,
             "down": 0x28,
             "space": 0x20,
+            ",": 0xBC,  # VK_OEM_COMMA
         }
 
         mods = 0

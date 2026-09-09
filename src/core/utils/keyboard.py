@@ -50,6 +50,21 @@ def hotkey_from_event(e: ft.KeyboardEvent) -> str:
     return "+".join(parts)
 
 
+# A lib `keyboard` usa vírgula como separador de múltiplos passos de um hotkey
+# (ex.: "a, b" = pressionar "a" e depois "b"), então uma vírgula literal como
+# tecla precisa do nome canônico dela para não ser interpretada como separador.
+_KEYBOARD_LIB_KEY_ALIASES = {
+    ",": "comma",
+}
+
+
+def _apply_keyboard_lib_aliases(shortcut: str) -> str:
+    """Traduz teclas que colidem com a sintaxe da lib `keyboard` para seus nomes canônicos."""
+    parts = shortcut.split("+")
+    parts[-1] = _KEYBOARD_LIB_KEY_ALIASES.get(parts[-1], parts[-1])
+    return "+".join(parts)
+
+
 def expand_shortcut_variants(shortcut: str) -> list[str]:
     """Cria variações equivalentes para aumentar a compatibilidade de registro de atalhos."""
     raw = shortcut.strip()
@@ -66,6 +81,7 @@ def expand_shortcut_variants(shortcut: str) -> list[str]:
     deduped: list[str] = []
     for variant in variants:
         normalized = "+".join(part.strip() for part in variant.split("+") if part.strip())
+        normalized = _apply_keyboard_lib_aliases(normalized)
         if normalized and normalized not in deduped:
             deduped.append(normalized)
 
