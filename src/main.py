@@ -79,8 +79,29 @@ def _handle_configure_spotify() -> None:
         )
         return
 
+    bypass_admin = False
+    if win32.is_process_elevated():
+        proceed_elevated = win32.confirm_dialog(
+            "Spotify",
+            "O WyrmPlayerControl está rodando como administrador. O Spicetify recomenda "
+            "não configurar/aplicar extensões nesse modo: o Spotify roda como usuário "
+            "normal e pode ficar com a tela em branco se não conseguir acessar arquivos "
+            "modificados por um processo elevado. Continuar mesmo assim?",
+            warning=True,
+        )
+        if not proceed_elevated:
+            logger.info("Spotify setup: usuário optou por não continuar rodando como admin.")
+            win32.info_dialog(
+                "Spotify",
+                "Configuração cancelada. Para configurar com segurança, feche o "
+                "WyrmPlayerControl, abra um terminal comum (sem administrador) e rode:\n\n"
+                "spicetify config extensions webnowplaying.js\nspicetify apply",
+            )
+            return
+        bypass_admin = True
+
     if not status.extension_enabled and not spotify_setup.configure_extension(
-        status.spicetify_path
+        status.spicetify_path, bypass_admin=bypass_admin
     ):
         win32.info_dialog("Spotify", "Falha ao configurar a extensão. Veja o log para detalhes.")
         return
@@ -94,7 +115,7 @@ def _handle_configure_spotify() -> None:
         logger.info("Spotify setup: usuário cancelou a aplicação (spicetify apply).")
         return
 
-    if spotify_setup.apply_changes(status.spicetify_path):
+    if spotify_setup.apply_changes(status.spicetify_path, bypass_admin=bypass_admin):
         win32.info_dialog("Spotify", "Integração aplicada com sucesso.")
     else:
         win32.info_dialog("Spotify", "Falha ao aplicar as mudanças. Veja o log para detalhes.")
