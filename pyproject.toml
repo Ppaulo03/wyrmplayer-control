@@ -29,6 +29,11 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# main.py insere a raiz do projeto em sys.path antes dos imports 'src.*',
+# então os imports não podem ficar no topo do arquivo.
+"main.py" = ["E402"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -50,6 +55,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.14.0",
     "pyinstaller>=6.19.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=0.23.0",

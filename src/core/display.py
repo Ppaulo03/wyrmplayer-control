@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+
 from src.infrastructure.win32 import get_monitors_info
+
 
 @dataclass(frozen=True)
 class MonitorArea:
     """Representa um monitor e sua work area no Windows."""
+
     index: int
     label: str
     left: int
@@ -38,7 +41,7 @@ HUD_POSITION_PRESETS: dict[str, str] = {
 def list_monitors() -> list[MonitorArea]:
     """Lista os monitores disponíveis abstraindo a complexidade do Win32."""
     monitors_data = get_monitors_info()
-    
+
     if not monitors_data:
         # Fallback para caso de erro ou não-Windows
         return [MonitorArea(0, "Tela 1", 0, 0, 1920, 1080, 0, 0, 1920, 1080)]
@@ -46,7 +49,10 @@ def list_monitors() -> list[MonitorArea]:
     return [
         MonitorArea(
             index=m["index"],
-            label=f"Tela {m['index'] + 1} ({m['work_rect'][2] - m['work_rect'][0]}x{m['work_rect'][3] - m['work_rect'][1]})",
+            label=(
+                f"Tela {m['index'] + 1} "
+                f"({m['work_rect'][2] - m['work_rect'][0]}x{m['work_rect'][3] - m['work_rect'][1]})"
+            ),
             left=m["monitor_rect"][0],
             top=m["monitor_rect"][1],
             right=m["monitor_rect"][2],
@@ -55,7 +61,8 @@ def list_monitors() -> list[MonitorArea]:
             work_top=m["work_rect"][1],
             work_right=m["work_rect"][2],
             work_bottom=m["work_rect"][3],
-        ) for m in monitors_data
+        )
+        for m in monitors_data
     ]
 
 
@@ -75,7 +82,12 @@ def resolve_hud_position(
     margin: int = 20,
 ) -> tuple[int, int]:
     """Resolve coordenadas da janela do HUD com base no monitor e preset."""
-    left, top, right, bottom = monitor.work_left, monitor.work_top, monitor.work_right, monitor.work_bottom
+    left, top, right, bottom = (
+        monitor.work_left,
+        monitor.work_top,
+        monitor.work_right,
+        monitor.work_bottom,
+    )
 
     max_left = max(left + 8, right - hud_width - 8)
     max_top = max(top + 8, bottom - hud_height - 8)
@@ -86,9 +98,14 @@ def resolve_hud_position(
         "top_left": (left + margin, top + margin),
         "top_center": (left + (monitor.width - hud_width) // 2, top + margin),
         "bottom_center": (left + (monitor.width - hud_width) // 2, bottom - hud_height - margin),
-        "center": (left + (monitor.width - hud_width) // 2, top + (monitor.height - hud_height) // 2),
+        "center": (
+            left + (monitor.width - hud_width) // 2,
+            top + (monitor.height - hud_height) // 2,
+        ),
     }
 
-    target_left, target_top = positions.get(preset, (right - hud_width - margin, bottom - hud_height - margin))
+    target_left, target_top = positions.get(
+        preset, (right - hud_width - margin, bottom - hud_height - margin)
+    )
 
     return max(left + 8, min(target_left, max_left)), max(top + 8, min(target_top, max_top))

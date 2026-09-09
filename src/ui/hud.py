@@ -1,12 +1,12 @@
 import asyncio
 import logging
+from typing import cast
 
 import flet as ft
 
 from src.core.config import ConfigManager
 from src.core.display import get_monitor_by_index, resolve_hud_position
 from src.core.state import AppState, StateCategory
-from typing import Any, cast
 from src.infrastructure import win32
 
 logger = logging.getLogger(__name__)

@@ -1,10 +1,15 @@
+from collections.abc import Callable
+from typing import Any
+
 import flet as ft
+
 from src.core.config import AppConfig
 from src.core.display import HUD_POSITION_PRESETS, list_monitors
 
-def layout_tab(cfg: AppConfig, on_change: callable) -> ft.Control:
+
+def layout_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
     """Aba de Posicionamento e Gatilhos do HUD."""
-    
+
     monitors = list_monitors()
     monitor_dropdown = ft.Dropdown(
         label="Tela do overlay",
@@ -27,33 +32,49 @@ def layout_tab(cfg: AppConfig, on_change: callable) -> ft.Control:
     t_play = ft.Switch(label="Pausar/Play", value=cfg.triggers["playback"], on_change=on_change)
 
     layout_card = ft.Container(
-        padding=16, border_radius=14, bgcolor="#0D1422", border=ft.border.all(1, "#23314A"),
-        content=ft.Column([
-            ft.Text("Posição do Overlay", size=24, weight=ft.FontWeight.BOLD),
-            ft.Text("Escolha a tela e o preset de posição.", size=12, color=ft.Colors.WHITE60),
-            monitor_dropdown,
-            position_dropdown,
-        ], spacing=10, tight=True)
+        padding=16,
+        border_radius=14,
+        bgcolor="#0D1422",
+        border=ft.border.all(1, "#23314A"),
+        content=ft.Column(
+            [
+                ft.Text("Posição do Overlay", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text("Escolha a tela e o preset de posição.", size=12, color=ft.Colors.WHITE60),
+                monitor_dropdown,
+                position_dropdown,
+            ],
+            spacing=10,
+            tight=True,
+        ),
     )
 
     triggers_card = ft.Container(
-        padding=16, border_radius=14, bgcolor="#0D1422", border=ft.border.all(1, "#23314A"),
-        content=ft.Column([
-            ft.Text("Quando Mostrar o HUD", size=24, weight=ft.FontWeight.BOLD),
-            ft.Container(t_vol, bgcolor="#101A2C", border_radius=10, padding=10),
-            ft.Container(t_meta, bgcolor="#101A2C", border_radius=10, padding=10),
-            ft.Container(t_play, bgcolor="#101A2C", border_radius=10, padding=10),
-        ], spacing=10, tight=True)
+        padding=16,
+        border_radius=14,
+        bgcolor="#0D1422",
+        border=ft.border.all(1, "#23314A"),
+        content=ft.Column(
+            [
+                ft.Text("Quando Mostrar o HUD", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(t_vol, bgcolor="#101A2C", border_radius=10, padding=10),
+                ft.Container(t_meta, bgcolor="#101A2C", border_radius=10, padding=10),
+                ft.Container(t_play, bgcolor="#101A2C", border_radius=10, padding=10),
+            ],
+            spacing=10,
+            tight=True,
+        ),
     )
 
-    col = ft.Column([layout_card, triggers_card], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
-    
+    col = ft.Column(
+        [layout_card, triggers_card], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True
+    )
+
     col.data = {
         "hud_monitor": monitor_dropdown,
         "hud_position": position_dropdown,
         "volume": t_vol,
         "metadata": t_meta,
-        "playback": t_play
+        "playback": t_play,
     }
-    
+
     return col

@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from ctypes import wintypes
-from typing import Any, cast, Optional
+from typing import Any, cast
 
 import keyboard
 
@@ -31,17 +31,15 @@ class HotkeyManager:
         self._native_thread: threading.Thread | None = None
         self._native_ready = threading.Event()
         self._native_stop = threading.Event()
-        self._native_commands: queue.Queue[
-            tuple[str, Any, threading.Event, dict[str, Any]]
-        ] = queue.Queue()
+        self._native_commands: queue.Queue[tuple[str, Any, threading.Event, dict[str, Any]]] = (
+            queue.Queue()
+        )
         self._native_callbacks: dict[int, Callable[[], None]] = {}
         self._next_hotkey_id = 1
 
     # Métodos delegados para keyboard_utils
 
-    def _safe_hotkey_callback(
-        self, name: str, callback: Callable[[], None]
-    ) -> Callable[[], None]:
+    def _safe_hotkey_callback(self, name: str, callback: Callable[[], None]) -> Callable[[], None]:
         """Protege callback de hotkey para facilitar diagnóstico em runtime."""
 
         def wrapped() -> None:
@@ -155,11 +153,7 @@ class HotkeyManager:
                                 hotkey_id = self._next_hotkey_id
                                 self._next_hotkey_id += 1
 
-                                ok = bool(
-                                    self._user32.RegisterHotKey(
-                                        None, hotkey_id, mods, vk
-                                    )
-                                )
+                                ok = bool(self._user32.RegisterHotKey(None, hotkey_id, mods, vk))
                                 if not ok:
                                     logger.error(
                                         "Erro ao registrar hotkey nativa '%s' (codigo=%s).",
@@ -170,9 +164,7 @@ class HotkeyManager:
 
                                 self._native_callbacks[hotkey_id] = callback
                                 registered_count += 1
-                                logger.info(
-                                    "Hotkey configurada (nativa): %s", callback_name
-                                )
+                                logger.info("Hotkey configurada (nativa): %s", callback_name)
 
                             result["ok"] = registered_count > 0
                         elif command == "stop":
@@ -189,13 +181,9 @@ class HotkeyManager:
                     finally:
                         done_event.set()
 
-                while self._user32.PeekMessageW(
-                    ctypes.byref(msg), None, 0, 0, PM_REMOVE
-                ):
+                while self._user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                     if msg.message == WM_HOTKEY:
-                        cb: Callable[[], None] | None = self._native_callbacks.get(
-                            int(msg.wParam)
-                        )
+                        cb: Callable[[], None] | None = self._native_callbacks.get(int(msg.wParam))
                         if cb is not None:
                             cb()
 
@@ -217,9 +205,7 @@ class HotkeyManager:
         done_event.wait(timeout=2.0)
         return bool(result.get("ok", False))
 
-    def _setup_low_level_keyboard_hotkeys(
-        self, hotkey_map: dict[str, Callable[[], None]]
-    ) -> bool:
+    def _setup_low_level_keyboard_hotkeys(self, hotkey_map: dict[str, Callable[[], None]]) -> bool:
         """Registra hotkeys usando biblioteca keyboard com suporte a fullscreen."""
         # Use the keyboard library with suppress=False to allow input to pass through
         # This will work in fullscreen games
@@ -232,9 +218,7 @@ class HotkeyManager:
                     # suppress=False allows keys to pass through to the game
                     # This is the key to fullscreen game support
                     keyboard.add_hotkey(variant, safe_callback, suppress=False)
-                    logger.info(
-                        "Hotkey configurada (fullscreen compatible): %s", variant
-                    )
+                    logger.info("Hotkey configurada (fullscreen compatible): %s", variant)
                 except Exception as e:
                     logger.error("Erro ao registrar hotkey '%s': %s", variant, e)
                     unsupported.append(shortcut)
@@ -247,9 +231,7 @@ class HotkeyManager:
 
         ok = len(hotkey_map) > 0 and len(set(unsupported)) < len(hotkey_map)
         if ok:
-            logger.info(
-                "Sistema de Hotkeys configurado com sucesso (fullscreen compatible)."
-            )
+            logger.info("Sistema de Hotkeys configurado com sucesso (fullscreen compatible).")
 
         return ok
 
