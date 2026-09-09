@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 WEBNOWPLAYING_EXTENSION = "webnowplaying.js"
 # Porta fixa esperada pela extensão webnowplaying.js do Spicetify (não configurável nela).
 WEBNOWPLAYING_PORT = 8974
+# Prefixo do pacote da versão Microsoft Store do Spotify — incompatível com o Spicetify.
+SPOTIFY_STORE_PACKAGE_PREFIX = "SpotifyAB.SpotifyMusic_"
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,7 @@ class SpotifySetupStatus:
     """Resultado do diagnóstico (somente leitura) da integração com Spotify via Spicetify."""
 
     spotify_installed: bool
+    spotify_is_microsoft_store: bool
     spicetify_path: Path | None
     extension_enabled: bool
     port_matches: bool
@@ -29,7 +32,12 @@ class SpotifySetupStatus:
     @property
     def ready(self) -> bool:
         """Tudo pronto: Spicetify instalado, extensão habilitada e porta correta."""
-        return self.spicetify_installed and self.extension_enabled and self.port_matches
+        return (
+            not self.spotify_is_microsoft_store
+            and self.spicetify_installed
+            and self.extension_enabled
+            and self.port_matches
+        )
 
 
 def find_spotify_executable() -> Path | None:
@@ -40,6 +48,24 @@ def find_spotify_executable() -> Path | None:
 
     candidate = Path(appdata) / "Spotify" / "Spotify.exe"
     return candidate if candidate.exists() else None
+
+
+def is_spotify_microsoft_store() -> bool:
+    """
+    Detecta se o Spotify instalado é a versão da Microsoft Store.
+
+    O Spicetify não é compatível com essa versão (o pacote roda em sandbox e não
+    pode ser modificado da mesma forma que a instalação padrão via spotify.com).
+    """
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if not local_appdata:
+        return False
+
+    packages_dir = Path(local_appdata) / "Packages"
+    if not packages_dir.exists():
+        return False
+
+    return any(packages_dir.glob(f"{SPOTIFY_STORE_PACKAGE_PREFIX}*"))
 
 
 def find_spicetify_executable() -> Path | None:
@@ -90,6 +116,7 @@ def check_status(websocket_port: int) -> SpotifySetupStatus:
 
     return SpotifySetupStatus(
         spotify_installed=find_spotify_executable() is not None,
+        spotify_is_microsoft_store=is_spotify_microsoft_store(),
         spicetify_path=spicetify_path,
         extension_enabled=is_extension_enabled(config_path),
         port_matches=websocket_port == WEBNOWPLAYING_PORT,
@@ -112,8 +139,10 @@ def configure_extension(spicetify_path: Path) -> bool:
 
     if result.returncode != 0:
         logger.error(
-            "Spotify setup: 'spicetify config extensions' retornou código %s: %s",
+            "Spotify setup: 'spicetify config extensions' retornou código %s. "
+            "stdout: %s | stderr: %s",
             result.returncode,
+            result.stdout.strip(),
             result.stderr.strip(),
         )
         return False
@@ -138,8 +167,9 @@ def apply_changes(spicetify_path: Path) -> bool:
 
     if result.returncode != 0:
         logger.error(
-            "Spotify setup: 'spicetify apply' retornou código %s: %s",
+            "Spotify setup: 'spicetify apply' retornou código %s. stdout: %s | stderr: %s",
             result.returncode,
+            result.stdout.strip(),
             result.stderr.strip(),
         )
         return False
@@ -157,6 +187,14 @@ def run_startup_check(websocket_port: int) -> SpotifySetupStatus:
     explícita do usuário via tray — nunca acontece automaticamente aqui.
     """
     status = check_status(websocket_port)
+
+    if status.spotify_is_microsoft_store:
+        logger.warning(
+            "Spotify setup: o Spotify instalado é a versão da Microsoft Store, que não é "
+            "compatível com o Spicetify. Desinstale-a e instale a versão oficial em "
+            "https://www.spotify.com/download para usar a integração."
+        )
+        return status
 
     if not status.port_matches:
         logger.warning(

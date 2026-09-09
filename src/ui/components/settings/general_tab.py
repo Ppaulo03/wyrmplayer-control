@@ -14,6 +14,13 @@ def _spotify_status_message(cfg: AppConfig) -> tuple[str, str]:
     """Roda o diagnóstico (somente leitura) e traduz o resultado numa mensagem curta."""
     status = spotify_setup.check_status(cfg.websocket_port)
 
+    if status.spotify_is_microsoft_store:
+        return (
+            "O Spotify instalado é a versão da Microsoft Store, incompatível com o "
+            "Spicetify. Desinstale-a e instale a versão oficial em spotify.com/download.",
+            ft.Colors.RED_300,
+        )
+
     if status.spicetify_path is None:
         return (
             f"Spicetify não encontrado. Instale em {SPICETIFY_WEBSITE}, reinicie o "
