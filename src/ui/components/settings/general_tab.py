@@ -1,9 +1,45 @@
+import webbrowser
 from collections.abc import Callable
 from typing import Any
 
 import flet as ft
 
 from src.core.config import AppConfig
+from src.services import spotify_setup
+
+SPICETIFY_WEBSITE = "https://spicetify.app"
+
+
+def _spotify_status_message(cfg: AppConfig) -> tuple[str, str]:
+    """Roda o diagnóstico (somente leitura) e traduz o resultado numa mensagem curta."""
+    status = spotify_setup.check_status(cfg.websocket_port)
+
+    if status.spicetify_path is None:
+        return (
+            f"Spicetify não encontrado. Instale em {SPICETIFY_WEBSITE}, reinicie o "
+            "WyrmPlayerControl e clique em 'Configurar Spotify' na tray.",
+            ft.Colors.ORANGE_300,
+        )
+
+    if not status.port_matches:
+        return (
+            f"Porta do WebSocket incompatível: a extensão do Spotify exige a porta "
+            f"{spotify_setup.WEBNOWPLAYING_PORT} fixa (atual: {cfg.websocket_port}).",
+            ft.Colors.RED_300,
+        )
+
+    if not status.extension_enabled:
+        return (
+            "Spicetify encontrado. A extensão será registrada automaticamente ao "
+            "reiniciar o WyrmPlayerControl.",
+            ft.Colors.AMBER_300,
+        )
+
+    return (
+        "Tudo pronto! Se ainda não aplicou, clique em 'Configurar Spotify' na tray "
+        "(isso reinicia o Spotify).",
+        ft.Colors.GREEN_300,
+    )
 
 
 def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
@@ -53,11 +89,32 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
         on_blur=on_change,
     )
 
+    spotify_status = ft.Text(
+        size=12,
+        color=ft.Colors.WHITE60,
+        visible=False,
+    )
+
+    def _refresh_spotify_status() -> None:
+        if not spotify_integration.value:
+            spotify_status.visible = False
+            return
+
+        message, color = _spotify_status_message(cfg)
+        spotify_status.value = message
+        spotify_status.color = color
+        spotify_status.visible = True
+
+    def _on_spotify_toggle(e: Any) -> None:
+        _refresh_spotify_status()
+        on_change(e)
+
     spotify_integration = ft.Switch(
         label="Integração com Spotify (Spicetify)",
         value=cfg.spotify_integration,
-        on_change=on_change,
+        on_change=_on_spotify_toggle,
     )
+    _refresh_spotify_status()
 
     card = ft.Container(
         padding=16,
@@ -78,12 +135,19 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
                 ft.Text("Porta do WebSocket", size=13, color=ft.Colors.WHITE70),
                 websocket_port,
                 ft.Text(
-                    "Integração com Spotify requer Spicetify instalado. Ao ativar, use "
-                    "'Configurar Spotify' na system tray.",
+                    "Como configurar o Spotify: 1) instale o Spicetify; 2) ative esta opção "
+                    "e reinicie o WyrmPlayerControl; 3) clique em 'Configurar Spotify' na "
+                    "system tray para aplicar.",
                     size=13,
                     color=ft.Colors.WHITE70,
                 ),
+                ft.TextButton(
+                    "Abrir spicetify.app",
+                    icon=ft.Icons.OPEN_IN_NEW,
+                    on_click=lambda e: webbrowser.open(SPICETIFY_WEBSITE),
+                ),
                 spotify_integration,
+                spotify_status,
             ],
             spacing=10,
             tight=True,
