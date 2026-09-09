@@ -11,6 +11,7 @@ if root_path not in sys.path:
 
 import flet as ft
 
+from src.core import autostart
 from src.core.config import ConfigManager
 from src.core.hotkeys import HotkeyManager
 
@@ -30,6 +31,9 @@ from src.ui.tray import SystemTrayManager
 # Inicialização do Gerenciador de Configuração
 cfg_manager = ConfigManager()
 app_cfg = cfg_manager.load()
+
+# Alinha o registro de "iniciar com o Windows" ao valor salvo (cobre edição manual do settings.json)
+autostart.sync(app_cfg.start_with_windows)
 
 # Configuração de Logging
 log_file_path = setup_initial_logging(

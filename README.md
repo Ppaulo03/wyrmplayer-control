@@ -115,6 +115,7 @@ Campos principais:
 8. hotkeys: mapa de comandos para atalhos.
 9. triggers: quando o HUD deve aparecer (volume/metadata/playback).
 10. spotify_integration: habilita a checagem/configuração automática da integração com Spotify via Spicetify (veja abaixo).
+11. start_with_windows: registra (ou remove) o app em `HKCU\...\Run` para iniciar junto com o Windows.
 
 Exemplo:
 
@@ -140,7 +141,8 @@ Exemplo:
     "metadata": true,
     "playback": true
   },
-  "spotify_integration": false
+  "spotify_integration": false,
+  "start_with_windows": false
 }
 ```
 
@@ -181,8 +183,9 @@ Saída esperada:
 
 1. Single instance no processo principal para evitar múltiplas cópias concorrentes.
 2. Janela de configurações abre em modo dedicado (--settings) sem conflitar com o singleton.
-3. Logging dinâmico: mudanças de log_level e log_file são aplicadas em runtime.
+3. Logging dinâmico: mudanças de log_level, log_file e websocket_port são aplicadas em runtime (sem precisar reiniciar).
 4. Encerramento via tray com limpeza de tarefas e finalização do processo.
+5. Ao iniciar com o Windows, o app abre **sem elevar** (`--no-admin-relaunch`), para não pedir confirmação de administrador a cada login. Isso significa que os atalhos globais podem não funcionar sobre janelas de jogos elevados até você reabrir o app manualmente (aí sim ele eleva normalmente).
 
 ## Troubleshooting
 

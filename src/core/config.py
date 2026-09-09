@@ -25,6 +25,8 @@ class AppConfig:
     log_file: str = "wyrmplayer.log"
     # Habilita a checagem/configuração automática da integração com Spotify (Spicetify) no startup.
     spotify_integration: bool = False
+    # Registra (ou remove) o app em HKCU\...\Run para iniciar junto com o Windows.
+    start_with_windows: bool = False
     # Atalhos Globais
     hotkeys: dict[str, str] = field(
         default_factory=lambda: {
