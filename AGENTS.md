@@ -33,7 +33,7 @@ src/
   domain/          lógica de domínio pura, sem I/O: parsing de metadata, protocolos (interfaces)
   services/        orquestração: PlayerController (comandos), ConfigWatcher (hot-reload), spotify_setup (diagnóstico/config do Spicetify)
   infrastructure/  chamadas Win32 diretas (ctypes): monitores, janelas, hooks de teclado, elevação
-  ui/              Flet: HUD, tray, tela de settings e suas abas (components/settings/*)
+  ui/              Flet: HUD, tray, tela de settings (theme.py + components/settings/*)
   main.py          composition root: cria managers, liga callbacks, roda o loop Flet
 ```
 
@@ -58,6 +58,9 @@ Pontos de desacoplamento a preservar:
 
 ## Convenções específicas deste repo
 
+- **Tela de configurações usa o sistema visual "wyrm"** (`src/ui/theme.py`): void/plate por luminância (sem sombra), hairline de 1px, zero `border_radius`, um único accent (`#D99A3A`). Tipografia em 3 fontes carregadas de `assets/fonts/*.ttf` via `page.fonts` (Archivo para títulos, IBM Plex Sans pro corpo, JetBrains Mono para todo dado — porta, %, segundos, status). Novo controle nesse padrão? Use os helpers de `theme.py` (`wyrm_switch`, `row`, `row_text`, `group_label`, `mono`, `value_text`) em vez de `ft.Switch`/cores soltas — mantém a tela inteira consistente.
+- **`theme.wyrm_switch` não é um `ft.Switch`**: é um `ft.Container` customizado (sem cantos arredondados) que guarda seu próprio estado em `.data` (bool), não em `.value`. Ao ler esses campos em `save_settings()`, use `.data`, não `.value` — só sliders/dropdowns/textfields nativos do Flet usam `.value`.
+- **Navegação da tela de settings é por seção** (`src/ui/settings.py`): 5 seções (Geral/Atalhos/Exibição/Integrações/Avançado) numa barra lateral, cada uma num arquivo próprio em `components/settings/`. Adicionar uma opção nova? Decida primeiro em qual seção ela pertence pelo tema, não pelo arquivo que já existe.
 - **Comentários e logs em português**; mantenha esse idioma ao editar código existente. Novo código pode seguir o mesmo padrão para consistência.
 - **Sem type hints ausentes**: `mypy --strict` está configurado; funções novas precisam de assinatura tipada completa.
 - **`AppConfig` é a fonte da verdade de schema de config** (`src/core/config.py`). Adicionar um campo novo requer: (1) campo no dataclass com default, (2) leitura/escrita na respectiva aba em `src/ui/components/settings/`, (3) tratamento em `ConfigWatcher` se precisar reagir a mudanças em runtime, (4) atualizar exemplo no `README.md`.

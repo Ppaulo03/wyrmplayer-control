@@ -5,6 +5,7 @@ import flet as ft
 
 from src.core.config import AppConfig
 from src.core.utils.keyboard import hotkey_from_event
+from src.ui import theme
 
 _PageLike = ft.Page | ft.BasePage
 
@@ -16,7 +17,7 @@ class _CaptureState:
 
 
 def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Text) -> ft.Control:
-    """Aba de Atalhos de Teclado com lógica de captura integrada."""
+    """Seção Atalhos: captura de combinações de teclado."""
 
     fields: dict[str, ft.TextField] = {}
     capturing = _CaptureState()
@@ -39,22 +40,22 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
             return
 
         if hotkey == "esc":
-            status_text.value = "Captura cancelada"
-            status_text.color = ft.Colors.ORANGE_300
+            status_text.value = "captura cancelada"
+            status_text.color = theme.DIM
             stop_capture(e.page)
             return
 
         field.value = hotkey
         on_save()
-        status_text.value = f"Atalho de {label} salvo: {hotkey}"
-        status_text.color = ft.Colors.GREEN_300
+        status_text.value = f"{label.lower()} salvo: {hotkey}"
+        status_text.color = theme.POSITIVE
         stop_capture(e.page)
 
     def start_capture(field: ft.TextField, label: str, page: _PageLike) -> None:
         capturing.field = field
         capturing.label = label
-        status_text.value = f"Pressione o novo atalho para {label} (Esc cancela)"
-        status_text.color = ft.Colors.AMBER_300
+        status_text.value = f"pressione o novo atalho para {label.lower()} (esc cancela)"
+        status_text.color = theme.ACCENT
         if isinstance(page, ft.Page):
             page.on_keyboard_event = on_capture_key
         page.update()
@@ -62,60 +63,64 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
     def on_clear(label: str, field: ft.TextField, page: _PageLike) -> None:
         field.value = ""
         on_save()
-        status_text.value = f"Atalho de {label} limpo"
-        status_text.color = ft.Colors.ORANGE_300
+        status_text.value = f"{label.lower()} limpo"
+        status_text.color = theme.DIM
         page.update()
 
     def hotkey_row(label: str, key: str) -> ft.Control:
         field = ft.TextField(
-            label=label,
             value=cfg.hotkeys.get(key, ""),
-            border=ft.InputBorder.OUTLINE,
+            border=ft.InputBorder.NONE,
+            bgcolor=theme.PLATE_1,
+            color=theme.ACCENT,
+            text_style=ft.TextStyle(font_family=theme.FONT_MONO, size=12.5),
             dense=True,
             read_only=True,
+            text_align=ft.TextAlign.RIGHT,
             expand=True,
         )
         fields[key] = field
-        return ft.Row(
-            [
-                field,
-                ft.OutlinedButton(
-                    "Gravar",
-                    icon=ft.Icons.KEYBOARD,
-                    on_click=lambda e: start_capture(field, label, e.page),
-                ),
-                ft.IconButton(
-                    ft.Icons.CLOSE,
-                    tooltip="Limpar",
-                    on_click=lambda e: on_clear(label, field, e.page),
-                ),
-            ],
-            spacing=8,
+        return theme.row(
+            ft.Row(
+                [
+                    theme.row_text(label),
+                    field,
+                    ft.IconButton(
+                        ft.Icons.KEYBOARD,
+                        icon_color=theme.DIM,
+                        icon_size=16,
+                        tooltip="gravar",
+                        on_click=lambda e: start_capture(field, label, e.page),
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CLOSE,
+                        icon_color=theme.DIM,
+                        icon_size=16,
+                        tooltip="limpar",
+                        on_click=lambda e: on_clear(label, field, e.page),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            )
         )
 
-    card = ft.Container(
-        padding=16,
-        border_radius=14,
-        bgcolor="#0D1422",
-        border=ft.border.all(1, "#23314A"),
-        content=ft.Column(
-            [
-                ft.Text("Atalhos de Teclado", size=24, weight=ft.FontWeight.BOLD),
-                ft.Text(
-                    "Clique em Gravar para capturar. Salvamento automático.",
-                    size=12,
-                    color=ft.Colors.WHITE60,
-                ),
-                hotkey_row("Play/Pause", "play_pause"),
-                hotkey_row("Anterior", "previous_track"),
-                hotkey_row("Próxima", "next_track"),
-                hotkey_row("Volume +", "volume_up"),
-                hotkey_row("Volume -", "volume_down"),
-                hotkey_row("Mute", "mute"),
-            ],
-            spacing=10,
-            tight=True,
-        ),
+    content = ft.Column(
+        [
+            theme.panel_title("Atalhos"),
+            theme.panel_subtitle("clique em gravar para capturar — salvamento automático"),
+            theme.group_label("transporte"),
+            hotkey_row("Play/Pause", "play_pause"),
+            hotkey_row("Anterior", "previous_track"),
+            hotkey_row("Próxima", "next_track"),
+            theme.group_label("volume"),
+            hotkey_row("Volume +", "volume_up"),
+            hotkey_row("Volume -", "volume_down"),
+            hotkey_row("Mute", "mute"),
+        ],
+        spacing=0,
+        tight=True,
+        scroll=ft.ScrollMode.AUTO,
+        expand=True,
     )
-    card.data = fields
-    return card
+    content.data = fields
+    return content

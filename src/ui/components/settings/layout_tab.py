@@ -5,71 +5,79 @@ import flet as ft
 
 from src.core.config import AppConfig
 from src.core.display import HUD_POSITION_PRESETS, list_monitors
+from src.ui import theme
+
+
+def _dropdown(value: str, options: list[ft.DropdownOption]) -> ft.Dropdown:
+    return ft.Dropdown(
+        value=value,
+        options=options,
+        border=ft.InputBorder.NONE,
+        bgcolor=theme.PLATE_1,
+        color=theme.ACCENT,
+        text_style=ft.TextStyle(font_family=theme.FONT_MONO, size=12.5),
+        width=180,
+        content_padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+    )
 
 
 def layout_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
-    """Aba de Posicionamento e Gatilhos do HUD."""
+    """Seção Exibição: posição do overlay e gatilhos de exibição do HUD."""
 
     monitors = list_monitors()
-    monitor_dropdown = ft.Dropdown(
-        label="Tela do overlay",
-        value=str(min(max(cfg.hud_monitor, 0), len(monitors) - 1)),
-        options=[ft.DropdownOption(key=str(m.index), text=m.label) for m in monitors],
-        expand=True,
+    monitor_dropdown = _dropdown(
+        str(min(max(cfg.hud_monitor, 0), len(monitors) - 1)),
+        [ft.DropdownOption(key=str(m.index), text=m.label) for m in monitors],
     )
     monitor_dropdown.on_select = on_change
 
-    position_dropdown = ft.Dropdown(
-        label="Posição do overlay",
-        value=(cfg.hud_position if cfg.hud_position in HUD_POSITION_PRESETS else "bottom_right"),
-        options=[ft.DropdownOption(key=k, text=v) for k, v in HUD_POSITION_PRESETS.items()],
-        expand=True,
+    position_dropdown = _dropdown(
+        cfg.hud_position if cfg.hud_position in HUD_POSITION_PRESETS else "bottom_right",
+        [ft.DropdownOption(key=k, text=v.lower()) for k, v in HUD_POSITION_PRESETS.items()],
     )
     position_dropdown.on_select = on_change
 
-    t_vol = ft.Switch(label="Mudar Volume", value=cfg.triggers["volume"], on_change=on_change)
-    t_meta = ft.Switch(label="Mudar Música", value=cfg.triggers["metadata"], on_change=on_change)
-    t_play = ft.Switch(label="Pausar/Play", value=cfg.triggers["playback"], on_change=on_change)
+    t_vol = theme.wyrm_switch(cfg.triggers["volume"], on_change=on_change)
+    t_meta = theme.wyrm_switch(cfg.triggers["metadata"], on_change=on_change)
+    t_play = theme.wyrm_switch(cfg.triggers["playback"], on_change=on_change)
 
-    layout_card = ft.Container(
-        padding=16,
-        border_radius=14,
-        bgcolor="#0D1422",
-        border=ft.border.all(1, "#23314A"),
-        content=ft.Column(
-            [
-                ft.Text("Posição do Overlay", size=24, weight=ft.FontWeight.BOLD),
-                ft.Text("Escolha a tela e o preset de posição.", size=12, color=ft.Colors.WHITE60),
-                monitor_dropdown,
-                position_dropdown,
-            ],
-            spacing=10,
-            tight=True,
-        ),
+    def _trigger_row(label: str, switch: ft.Container) -> ft.Container:
+        return theme.row(
+            ft.Row(
+                [theme.row_text(label), switch],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            )
+        )
+
+    content = ft.Column(
+        [
+            theme.panel_title("Exibição"),
+            theme.panel_subtitle("posição do overlay e gatilhos de exibição"),
+            theme.group_label("posição"),
+            theme.row(
+                ft.Row(
+                    [theme.row_text("Tela do overlay"), monitor_dropdown],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                )
+            ),
+            theme.row(
+                ft.Row(
+                    [theme.row_text("Posição do overlay"), position_dropdown],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                )
+            ),
+            theme.group_label("gatilhos"),
+            _trigger_row("Mudar volume", t_vol),
+            _trigger_row("Mudar música", t_meta),
+            _trigger_row("Pausar/play", t_play),
+        ],
+        spacing=0,
+        tight=True,
+        scroll=ft.ScrollMode.AUTO,
+        expand=True,
     )
 
-    triggers_card = ft.Container(
-        padding=16,
-        border_radius=14,
-        bgcolor="#0D1422",
-        border=ft.border.all(1, "#23314A"),
-        content=ft.Column(
-            [
-                ft.Text("Quando Mostrar o HUD", size=24, weight=ft.FontWeight.BOLD),
-                ft.Container(t_vol, bgcolor="#101A2C", border_radius=10, padding=10),
-                ft.Container(t_meta, bgcolor="#101A2C", border_radius=10, padding=10),
-                ft.Container(t_play, bgcolor="#101A2C", border_radius=10, padding=10),
-            ],
-            spacing=10,
-            tight=True,
-        ),
-    )
-
-    col = ft.Column(
-        [layout_card, triggers_card], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True
-    )
-
-    col.data = {
+    content.data = {
         "hud_monitor": monitor_dropdown,
         "hud_position": position_dropdown,
         "volume": t_vol,
@@ -77,4 +85,4 @@ def layout_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
         "playback": t_play,
     }
 
-    return col
+    return content
