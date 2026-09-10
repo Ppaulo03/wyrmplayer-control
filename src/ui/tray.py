@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image, ImageColor, ImageDraw
+
+from src.ui import theme
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +81,25 @@ class SystemTrayManager:
         threading.Thread(target=_run, daemon=True).start()
 
     def _create_placeholder_icon(self) -> Image.Image:
-        """Cria um ícone simples para a bandeja."""
-        width = 64
-        height = 64
-        image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        dc = ImageDraw.Draw(image)
+        """
+        Cria um ícone de fallback caso assets/tray.ico não carregue — mesmo símbolo
+        "Cue" (coluna + seta de play recortada) usado em scripts/generate_icons.py,
+        redesenhado aqui em miniatura para não depender de um script fora de src/.
+        """
+        size = 64
+        void = ImageColor.getrgb(theme.VOID)
+        accent = ImageColor.getrgb(theme.ACCENT)
 
-        # Desenha um círculo âmbar (cor do nosso tema)
-        dc.ellipse((8, 8, 56, 56), fill=(255, 191, 0), outline=(255, 255, 255))
+        image = Image.new("RGBA", (size, size), (*void, 255))
+        draw = ImageDraw.Draw(image)
 
-        # Pequena nota musical simbólica (um ponto e uma haste)
-        dc.rectangle((30, 20, 35, 45), fill=(0, 0, 0))
-        dc.ellipse((20, 40, 35, 50), fill=(0, 0, 0))
+        stroke = 5
+        draw.line([(24, 12), (24, 52)], fill=accent, width=stroke)
+        draw.line([(24, 22), (40, 32), (24, 42)], fill=accent, width=stroke, joint="curve")
+
+        half = stroke / 2
+        for cx, cy in [(24, 12), (24, 52), (24, 22), (40, 32), (24, 42)]:
+            draw.rectangle([cx - half, cy - half, cx + half, cy + half], fill=accent)
 
         return image
 
@@ -114,22 +123,23 @@ class SystemTrayManager:
     def _run_icon(self) -> None:
         """Executa o ícone da bandeja (bloqueante na thread)."""
         menu = pystray.Menu(
-            pystray.MenuItem("Music Controller", lambda: None, enabled=False),
+            pystray.MenuItem("WyrmPlayer Control", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Configurações", lambda icon, item: self._open_settings()),
-            pystray.MenuItem("Recarregar Atalhos", lambda icon, item: self._reload_hotkeys()),
+            pystray.MenuItem("Recarregar atalhos", lambda icon, item: self._reload_hotkeys()),
             pystray.MenuItem(
                 "Configurar Spotify",
                 lambda icon, item: self._configure_spotify(),
                 visible=lambda item: self.is_spotify_integration_enabled(),
             ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Sair", self._on_exit_click),
         )
 
         self.icon = pystray.Icon(
             "wyrmplayer_controller",
             self._load_tray_icon(),
-            title="WyrmPlayer Controller",
+            title="WyrmPlayer Control",
             menu=menu,
         )
         self.icon.run()
