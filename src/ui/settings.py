@@ -139,7 +139,10 @@ def main(page: ft.Page) -> None:
             [
                 ft.Container(
                     content=ft.Row(
-                        [theme.diamond(8), theme.mono("wyrmplayer", size=12, color=theme.INK)],
+                        [
+                            ft.Image(src=str(assets_dir / "cue-mark.png"), width=14, height=14),
+                            theme.mono("wyrmplayer", size=12, color=theme.INK),
+                        ],
                         spacing=9,
                     ),
                     padding=ft.Padding.only(left=16, right=16, top=16, bottom=14),
