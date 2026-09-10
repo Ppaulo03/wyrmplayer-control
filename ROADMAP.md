@@ -16,7 +16,19 @@ Plano de trabalho para as próximas expansões do WyrmPlayerControl, organizado 
 - Opção secundária `start_with_windows_elevated` (só visível/relevante com `start_with_windows` ativo): quem precisa de atalhos garantidos sobre jogos elevados pode aceitar o prompt de UAC a cada login em troca disso. Avaliamos usar Tarefa Agendada com `-RunLevel Highest` para eliminar o prompt por completo, mas descartamos por ser mais complexo e por Tarefas Agendadas com elevação automática no login serem um padrão que alguns antivírus/EDR tratam como suspeito (técnica clássica de bypass de UAC).
 - Testado de ponta a ponta contra o registro real (enable → is_enabled → disable, sem deixar resíduo).
 
+## Fase 1.5 — Redesign da tela de configurações ✅ concluída
+
+Fora da ordem original do roadmap — o usuário pediu pra priorizar isso antes do HUD.
+
+- Reorganização: as 3 abas no topo (Geral/Atalhos/Exibição) viraram 5 seções numa barra lateral (Geral/Atalhos/Exibição/**Integrações**/**Avançado**) — Spotify e log/porta ganharam seção própria, tirando peso da aba Geral.
+- Visual: novo sistema "wyrm" (`src/ui/theme.py`) baseado no documento de identidade do usuário — void/plate por luminância (sem sombra/gradiente), zero `border_radius`, hairline de 1px, accent único `#D99A3A`, 3 fontes bundladas em `assets/fonts/` (Archivo, IBM Plex Sans, JetBrains Mono).
+- Componentes customizados: `theme.wyrm_switch` (switch quadrado, guarda estado em `.data`) e `theme.wyrm_slider` (Slider nativo do Flet, tematizado). Dropdowns/TextFields mantidos nativos, só restilizados.
+- Processo: 2 rounds de mockup (HTML) antes de implementar — o primeiro concept agradou na organização mas "parecia muito IA" (serifa decorativa, sombra, gradiente); o segundo aplicou o documento de identidade "wyrm" do usuário à risca.
+- Escopo consciente: a barra de título da janela continua a padrão do Windows (não foi pra frameless) — só o conteúdo interno segue o sistema novo.
+
 ## Fase 2 — Rework visual do HUD
+
+**Pausada** (o usuário pediu pra tratar o redesign das configurações primeiro — ver Fase 1.5). Os 3 conceitos visuais (Signal/Console/Aperture) já foram mostrados; falta o usuário escolher uma direção antes de implementar. Provavelmente vale reaplicar o sistema "wyrm" (agora estabelecido na Fase 1.5) em vez de uma das 3 propostas originais, já que elas antecederam essa decisão de identidade.
 
 Fundação para a Fase 3 — as features interativas (barra de progresso clicável, HUD seguindo o monitor do mouse) devem ser construídas sobre o HUD já reformulado, não sobre o atual, pra evitar retrabalho.
 

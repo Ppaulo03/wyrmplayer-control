@@ -11,7 +11,7 @@ Adicionar um campo novo a `AppConfig` (`src/core/config.py`) toca várias partes
 
 1. **Schema** — adicione o campo em `AppConfig` (`src/core/config.py`) com um valor default sensato. Campos `dict`/`list` precisam de `field(default_factory=...)`, não valor literal mutável.
 
-2. **UI de settings** — exponha o campo em uma das abas de `src/ui/components/settings/` (`general_tab.py`, `hotkeys_tab.py` ou `layout_tab.py`, conforme a natureza do campo). Siga o padrão existente: o controle Flet é guardado no dicionário `.data` do componente, e `src/ui/settings.py::save_settings` lê esse dicionário para montar o novo `AppConfig` e persistir via `config_manager.save`.
+2. **UI de settings** — exponha o campo em uma das 5 seções de `src/ui/components/settings/` (`general_tab.py`, `hotkeys_tab.py`, `layout_tab.py`, `integrations_tab.py` ou `advanced_tab.py`, conforme o tema — Geral/Atalhos/Exibição/Integrações/Avançado). Use os helpers de `src/ui/theme.py` (`wyrm_switch`, `row`, `row_text`, `group_label`, `mono`) em vez de `ft.Switch`/cores soltas, pra manter o visual consistente. O controle é guardado no dicionário `.data` do componente, e `src/ui/settings.py::save_settings` lê esse dicionário — **atenção**: campos criados com `theme.wyrm_switch` guardam o valor em `.data` (bool), não em `.value` como os controles nativos do Flet.
 
 3. **Hot-reload (`ConfigWatcher`)** — decida se o campo precisa de reação em runtime quando o `settings.json` é editado externamente (fora do app):
    - Se sim: adicione o rastreio do valor anterior (`self.last_<campo>`) no `__init__` de `src/services/config_watcher.py` e a comparação/ação em `_check_config_file`, seguindo o padrão já usado para `hotkeys` e `hud_monitor/hud_position`.
