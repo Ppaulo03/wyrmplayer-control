@@ -44,6 +44,10 @@ if user32:
     user32.GetWindowLongW.restype = wintypes.LONG
     user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
     user32.SetWindowLongW.restype = wintypes.LONG
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
 
 # --- Win32 Structures ---
 
@@ -129,6 +133,34 @@ def force_topmost(window_title: str) -> None:
         )
     except Exception as e:
         logger.warning(f"Win32: Falha ao forçar topmost em '{window_title}': {e}")
+
+
+SW_RESTORE = 9
+SW_SHOW = 5
+
+
+def focus_existing_window(window_title: str) -> bool:
+    """
+    Procura uma janela top-level pelo título e a traz para frente (restaura se
+    estava minimizada, mostra se estava oculta). Retorna True se a janela foi
+    encontrada — usado para evitar abrir uma segunda instância de uma janela
+    que já existe (ex.: a de Configurações, que fica oculta em vez de fechar).
+    """
+    if os_name() != "nt" or user32 is None:
+        return False
+
+    try:
+        hwnd = user32.FindWindowW(None, window_title)
+        if not hwnd:
+            return False
+
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_SHOW)
+        user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception as e:
+        logger.warning(f"Win32: Falha ao focar janela '{window_title}': {e}")
+        return False
 
 
 def is_desktop_locked() -> bool:
