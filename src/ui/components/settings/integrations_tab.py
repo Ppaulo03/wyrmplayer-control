@@ -40,8 +40,15 @@ def integrations_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Cont
     """Seção Integrações: fontes de reprodução externas (Spotify via Spicetify)."""
 
     hint_text = theme.mono("", size=11.5, color=theme.DIM)
+    hint_text.expand = True
     status_chip_holder = ft.Row([], spacing=8)
-    hint_row = theme.row(ft.Row([status_chip_holder, hint_text], spacing=8))
+    hint_row = theme.row(
+        ft.Row(
+            [status_chip_holder, hint_text],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+    )
     hint_row.visible = cfg.spotify_integration
 
     def _refresh_status() -> None:

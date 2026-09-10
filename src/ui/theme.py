@@ -80,7 +80,15 @@ def row(content: ft.Control, *, sub: bool = False) -> ft.Container:
     )
 
 
-def row_text(title: str, description: str = "", *, muted: bool = False) -> ft.Column:
+def row_text(
+    title: str, description: str = "", *, muted: bool = False, expand: bool = False
+) -> ft.Column:
+    """
+    `expand=True` faz o bloco (e a descrição, se houver) ocupar o espaço restante da
+    Row e quebrar linha em vez de estourar a largura — use quando não houver outro
+    controle com `expand=True` na mesma Row (ex.: um TextField), senão os dois vão
+    disputar o espaço e encolher.
+    """
     controls: list[ft.Control] = [
         ft.Text(
             title,
@@ -91,7 +99,7 @@ def row_text(title: str, description: str = "", *, muted: bool = False) -> ft.Co
     ]
     if description:
         controls.append(mono(description, size=10.5))
-    return ft.Column(controls, spacing=3, tight=True)
+    return ft.Column(controls, spacing=3, tight=True, expand=expand)
 
 
 def status_chip(text: str, *, ok: bool = True) -> ft.Container:
