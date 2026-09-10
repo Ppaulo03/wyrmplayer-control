@@ -22,6 +22,10 @@ _SECTIONS = [
     ("avancado", "Avançado"),
 ]
 
+# Título usado tanto para o title bar quanto para localizar a janela via Win32
+# (src.infrastructure.win32.focus_existing_window) quando a tray tenta reabri-la.
+WINDOW_TITLE = "Configurações - WyrmPlayer Control"
+
 
 def main(page: ft.Page) -> None:
     # --- Setup Inicial ---
@@ -33,7 +37,7 @@ def main(page: ft.Page) -> None:
     settings_icon = str(base_dir / os.path.join("assets", "icon.ico"))
     assets_dir = base_dir / "assets"
 
-    page.title = "Configurações - WyrmPlayer Control"
+    page.title = WINDOW_TITLE
     page.window.icon = settings_icon
     page.window.width, page.window.height = 720, 620
     page.window.resizable = True
@@ -42,6 +46,18 @@ def main(page: ft.Page) -> None:
     page.padding = 0
     page.fonts = {name: str(assets_dir / path) for name, path in theme.PAGE_FONTS.items()}
     page.theme = ft.Theme(font_family=theme.FONT_BODY)
+
+    # Fechar a janela (X, Alt+F4) apenas a esconde — o processo continua rodando
+    # em segundo plano para a tray poder reabri-la instantaneamente, em vez de
+    # criar uma nova instância a cada clique em "Configurações".
+    page.window.prevent_close = True
+
+    def _on_window_event(e: ft.WindowEvent[ft.Window]) -> None:
+        if e.type == ft.WindowEventType.CLOSE:
+            page.window.visible = False
+            page.update()
+
+    page.window.on_event = _on_window_event
 
     config_manager = ConfigManager()
     cfg = config_manager.load()
