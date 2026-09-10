@@ -111,6 +111,27 @@ uv run mypy src
 uv run pyinstaller WyrmPlayerControl.spec
 ```
 
+## Fluxo de Git
+
+Este repo usa **git-flow** (AVH edition), já inicializado (`git flow init`, configs em `git config --get-regexp '^gitflow\.'`).
+
+- **`master`**: produção/releases. **`develop`**: integração do próximo release. Nunca commite direto em nenhuma das duas — sempre por branch de trabalho + merge.
+- Branches de trabalho, a partir de `develop` (exceto `hotfix/*`, que parte de `master`):
+  - `feature/<nome>` — funcionalidade nova.
+  - `bugfix/<nome>` — correção antes do próximo release.
+  - `release/<versão>` — estabilização pré-release.
+  - `hotfix/<nome>` — correção urgente em produção (parte de `master`, mescla em `master` e `develop`).
+- Comandos típicos:
+  ```bash
+  git flow feature start <nome>
+  git flow feature finish <nome>
+  git flow release start <versão>
+  git flow release finish <versão>
+  git flow hotfix start <nome>
+  ```
+- Tags de versão seguem semver sem prefixo (`1.0.0`, `1.0.1`, ...).
+- **Commits deste repo não devem levar o trailer `Co-Authored-By: Claude ...`** — o histórico foi limpo desse trailer; não reintroduza em commits novos, mesmo quando a mudança for feita com apoio do Claude Code.
+
 ## Testes
 
 - `tests/` cobre: `config` (persistência/defaults), `state` (observer), `metadata_handler` (parsing de protocolo), `player_controller` (comandos/volume/mute), `keyboard_utils` (expansão de shortcuts).
