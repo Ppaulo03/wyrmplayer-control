@@ -16,7 +16,7 @@ def _dropdown(value: str, options: list[ft.DropdownOption]) -> ft.Dropdown:
         bgcolor=theme.PLATE_1,
         color=theme.ACCENT,
         text_style=ft.TextStyle(font_family=theme.FONT_MONO, size=12.5),
-        width=180,
+        width=228,
         content_padding=ft.Padding.symmetric(horizontal=8, vertical=6),
     )
 
