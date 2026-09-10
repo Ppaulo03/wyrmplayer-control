@@ -149,7 +149,6 @@ def main(page: ft.Page) -> None:
             ],
             spacing=0,
         ),
-        expand=True,
     )
 
     status_bar = ft.Container(
@@ -168,7 +167,12 @@ def main(page: ft.Page) -> None:
     page.add(
         ft.Column(
             [
-                ft.Row([nav, content_area], spacing=0, expand=True),
+                ft.Row(
+                    [nav, content_area],
+                    spacing=0,
+                    expand=True,
+                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                ),
                 status_bar,
             ],
             spacing=0,
