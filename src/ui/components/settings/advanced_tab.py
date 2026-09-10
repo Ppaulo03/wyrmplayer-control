@@ -74,6 +74,7 @@ def advanced_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
                         theme.row_text(
                             "Porta do WebSocket",
                             "8974 fixa se usar a integração com Spotify",
+                            expand=True,
                         ),
                         websocket_port,
                     ],

@@ -19,6 +19,7 @@ def general_tab(cfg: AppConfig, on_change: Callable[[Any], Any]) -> ft.Control:
                 theme.row_text(
                     "Iniciar elevado",
                     "pede confirmação do UAC a cada login; garante atalhos sobre janelas elevadas",
+                    expand=True,
                 ),
                 start_with_windows_elevated,
             ],
