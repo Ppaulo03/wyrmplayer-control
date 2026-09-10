@@ -10,7 +10,9 @@ from typing import Any, cast
 import pystray
 from PIL import Image, ImageColor, ImageDraw
 
+from src.infrastructure import win32
 from src.ui import theme
+from src.ui.settings import WINDOW_TITLE as SETTINGS_WINDOW_TITLE
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +35,27 @@ class SystemTrayManager:
         self.is_spotify_integration_enabled = is_spotify_integration_enabled
         self.icon: pystray.Icon | None = None
         self._configuring_spotify = threading.Lock()
+        self._settings_process: subprocess.Popen[bytes] | None = None
 
     def _open_settings(self) -> None:
-        """Abre a tela de configurações em um processo separado."""
+        """
+        Mostra a janela de Configurações, reaproveitando o processo já aberto
+        quando existir (fechar a janela apenas a esconde — ver src.ui.settings)
+        em vez de disparar uma nova instância a cada clique na tray.
+        """
         if self.on_open_settings is not None:
             self.on_open_settings()
+
+        if win32.focus_existing_window(SETTINGS_WINDOW_TITLE):
+            logger.info("Janela de configurações já aberta; trazendo para frente.")
+            return
 
         try:
             # Em build, abre o próprio executável em modo de configurações.
             if getattr(sys, "frozen", False):
-                subprocess.Popen([sys.executable, "--settings"])
+                self._settings_process = subprocess.Popen([sys.executable, "--settings"])
             else:
-                subprocess.Popen([sys.executable, "-m", "src.ui.settings"])
+                self._settings_process = subprocess.Popen([sys.executable, "-m", "src.ui.settings"])
             logger.info("Janela de configurações iniciada.")
         except Exception as e:
             logger.error(f"Erro ao abrir configurações: {e}")
@@ -125,7 +136,11 @@ class SystemTrayManager:
         menu = pystray.Menu(
             pystray.MenuItem("WyrmPlayer Control", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Configurações", lambda icon, item: self._open_settings()),
+            pystray.MenuItem(
+                "Configurações",
+                lambda icon, item: self._open_settings(),
+                default=True,
+            ),
             pystray.MenuItem("Recarregar atalhos", lambda icon, item: self._reload_hotkeys()),
             pystray.MenuItem(
                 "Configurar Spotify",
@@ -159,9 +174,12 @@ class SystemTrayManager:
         logger.info("System Tray inicializado.")
 
     def stop(self) -> None:
-        """Interrompe o ícone da bandeja, se estiver ativo."""
+        """Interrompe o ícone da bandeja e a janela de configurações, se ativos."""
         if self.icon is not None:
             self.icon.stop()
+
+        if self._settings_process is not None and self._settings_process.poll() is None:
+            self._settings_process.terminate()
 
     def refresh_menu(self) -> None:
         """Força a releitura das propriedades dinâmicas do menu (ex.: visibilidade)."""
