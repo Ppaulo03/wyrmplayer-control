@@ -35,10 +35,18 @@ class PlayerController:
         self._loop = loop
 
     def _notify_ui(self, category: StateCategory = StateCategory.ALL) -> None:
-        """Notifica a UI de forma segura entre threads usando o loop configurado."""
+        """
+        Notifica a UI de forma segura entre threads usando o loop configurado.
+
+        major=True: essa notificação vem de uma ação explícita do usuário (um
+        atalho), não de metadata assíncrona da extensão — então o HUD deve dar
+        feedback (mostrar) mesmo sem nenhum player conectado/tocando. Sem isso,
+        o HUD só reagia a mensagens reais da extensão (major=log_meta em
+        websocket.py) e atalhos nunca mostravam nada.
+        """
         if self._loop:
             self._loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self.state.notify(category=category))
+                lambda: asyncio.create_task(self.state.notify(major=True, category=category))
             )
         else:
             logger.warning(
@@ -48,14 +56,17 @@ class PlayerController:
     def play_pause(self) -> None:
         """Alterna entre reprodução e pausa."""
         self.messenger.enqueue_command("playPause")
+        self._notify_ui(category=StateCategory.PLAYBACK)
 
     def next_track(self) -> None:
         """Pula para a próxima música."""
         self.messenger.enqueue_command("next")
+        self._notify_ui(category=StateCategory.PLAYBACK)
 
     def previous_track(self) -> None:
         """Volta para a música anterior."""
         self.messenger.enqueue_command("previous")
+        self._notify_ui(category=StateCategory.PLAYBACK)
 
     def toggle_mute(self) -> None:
         """Alterna o estado de mute salvando o volume anterior."""

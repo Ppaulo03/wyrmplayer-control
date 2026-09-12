@@ -73,10 +73,13 @@ def main() -> None:
     master_with_bg.resize((1024, 1024), Image.LANCZOS).save(ASSETS_DIR / "original.png")
     master_transparent.resize((64, 64), Image.LANCZOS).save(ASSETS_DIR / "cue-mark.png")
 
+    # Fundo transparente para os ícones de UI (janela/tray) — um quadrado sólido
+    # atrás do símbolo destoa da barra de título/tray do Windows. master_with_bg
+    # fica só para o original.png (imagem "hero", não usada como ícone de chrome).
     icon_sizes = [16, 24, 32, 48, 64, 128, 256]
-    save_ico(master_with_bg, ASSETS_DIR / "icon.ico", icon_sizes)
-    save_ico(master_with_bg, ASSETS_DIR / "icon2.ico", icon_sizes)
-    save_ico(master_with_bg, ASSETS_DIR / "tray.ico", [16, 24, 32, 48])
+    save_ico(master_transparent, ASSETS_DIR / "icon.ico", icon_sizes)
+    save_ico(master_transparent, ASSETS_DIR / "icon2.ico", icon_sizes)
+    save_ico(master_transparent, ASSETS_DIR / "tray.ico", [16, 24, 32, 48])
 
     print(f"Ícones gerados em {ASSETS_DIR}")
 

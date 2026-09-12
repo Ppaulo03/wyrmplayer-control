@@ -81,7 +81,9 @@ No Brave, adicione exceção para localhost:
 
 ## Integração com Spotify (Spicetify)
 
-O WyrmPlayerControl também funciona com o cliente desktop do Spotify, via [Spicetify](https://spicetify.app) e a extensão `webnowplaying.js` (que já vem embutida na instalação do Spicetify).
+O WyrmPlayerControl também funciona com o cliente desktop do Spotify, via [Spicetify](https://spicetify.app) e a extensão `webnowplaying.js`.
+
+**Nota:** o `webnowplaying.js` normalmente já vem junto com a instalação do Spicetify (ex.: em `%localappdata%\spicetify\Extensions`, ao lado do próprio executável — não em `%appdata%\spicetify`, que é só onde fica o config). O WyrmPlayerControl detecta se o arquivo não é encontrado em nenhuma das pastas de extensões conhecidas (avisa no log e no diálogo/UI de Configurações) — se isso acontecer, tente reinstalar o Spicetify ou instalar a extensão manualmente (ex.: procurando por "WebNowPlaying" no Spicetify Marketplace).
 
 Pré-requisitos:
 
@@ -91,11 +93,10 @@ Pré-requisitos:
 
 Passos:
 
-1. Ative "Integração com Spotify (Spicetify)" na aba **Geral** das configurações (ou defina `"spotify_integration": true` no `settings.json`).
-2. Reinicie o WyrmPlayerControl. Se o Spicetify já estiver instalado, a extensão é registrada automaticamente (sem reiniciar o Spotify).
-3. Abra o menu da system tray e clique em **Configurar Spotify**. Isso confirma com você antes de rodar `spicetify apply`, que reinicia o cliente do Spotify para aplicar a integração.
+1. Ative "Integração com Spicetify" na aba **Integrações** das configurações (ou defina `"spotify_integration": true` no `settings.json`).
+2. Isso já configura e pergunta, ali mesmo, se pode reiniciar o Spotify para aplicar (`spicetify apply`). Também dá pra rodar de novo depois clicando em **configurar spotify** na mesma aba, ou no menu da system tray em **Configurar Spotify**.
 
-Se o Spicetify não estiver instalado, o app não o instala sozinho — a mensagem no log (e no diálogo da tray) aponta para a instalação manual em https://spicetify.app.
+Se o Spicetify (ou a extensão) não estiver instalado, o app não os instala sozinho — a mensagem no log (e no diálogo/UI) aponta para a instalação manual.
 
 **Nota sobre execução como administrador**: como o WyrmPlayerControl normalmente roda elevado (necessário para os atalhos globais), e o Spicetify se recusa a configurar/aplicar extensões nesse modo, o app detecta isso e roda o Spicetify de verdade sem privilégios administrativos (via uma tarefa agendada temporária), sem precisar de nenhuma ação manual sua nem aceitar riscos.
 

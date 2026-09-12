@@ -36,6 +36,7 @@ class SystemTrayManager:
         self.icon: pystray.Icon | None = None
         self._configuring_spotify = threading.Lock()
         self._settings_process: subprocess.Popen[bytes] | None = None
+        self._settings_lock = threading.Lock()
 
     def _open_settings(self) -> None:
         """
@@ -46,19 +47,30 @@ class SystemTrayManager:
         if self.on_open_settings is not None:
             self.on_open_settings()
 
-        if win32.focus_existing_window(SETTINGS_WINDOW_TITLE):
-            logger.info("Janela de configurações já aberta; trazendo para frente.")
-            return
+        # Serializa localizar-ou-abrir: sem isso, dois cliques rápidos na tray (ou
+        # um clique bem no instante em que a janela ainda está subindo, antes do
+        # FindWindowW conseguir localizá-la pelo título) podem passar os dois pela
+        # checagem de "já existe" e disparar dois processos/janelas duplicados.
+        with self._settings_lock:
+            if win32.focus_existing_window(SETTINGS_WINDOW_TITLE):
+                logger.info("Janela de configurações já aberta; trazendo para frente.")
+                return
 
-        try:
-            # Em build, abre o próprio executável em modo de configurações.
-            if getattr(sys, "frozen", False):
-                self._settings_process = subprocess.Popen([sys.executable, "--settings"])
-            else:
-                self._settings_process = subprocess.Popen([sys.executable, "-m", "src.ui.settings"])
-            logger.info("Janela de configurações iniciada.")
-        except Exception as e:
-            logger.error(f"Erro ao abrir configurações: {e}")
+            if self._settings_process is not None and self._settings_process.poll() is None:
+                logger.info("Configurações já em processo de abertura; ignorando clique adicional.")
+                return
+
+            try:
+                # Em build, abre o próprio executável em modo de configurações.
+                if getattr(sys, "frozen", False):
+                    self._settings_process = subprocess.Popen([sys.executable, "--settings"])
+                else:
+                    self._settings_process = subprocess.Popen(
+                        [sys.executable, "-m", "src.ui.settings"]
+                    )
+                logger.info("Janela de configurações iniciada.")
+            except Exception as e:
+                logger.error(f"Erro ao abrir configurações: {e}")
 
     def _reload_hotkeys(self) -> None:
         """Solicita ao HotkeyManager que recarregue os atalhos."""
@@ -98,10 +110,11 @@ class SystemTrayManager:
         redesenhado aqui em miniatura para não depender de um script fora de src/.
         """
         size = 64
-        void = ImageColor.getrgb(theme.VOID)
         accent = ImageColor.getrgb(theme.ACCENT)
 
-        image = Image.new("RGBA", (size, size), (*void, 255))
+        # Fundo transparente (alpha 0): um quadrado sólido atrás do símbolo
+        # destoa da tray do Windows — mesmo tratamento de scripts/generate_icons.py.
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
 
         stroke = 5
@@ -178,6 +191,12 @@ class SystemTrayManager:
         if self.icon is not None:
             self.icon.stop()
 
+        # .terminate() no Windows é um TerminateProcess imediato: mata o processo
+        # Python da janela de Configurações mas não necessariamente a janela
+        # nativa (flet.exe) que ele sobe por trás dos panos. Isso é coberto pelo
+        # Job Object criado em win32.create_orphan_safeguard_job() no processo
+        # principal — como o flet.exe é neto desse processo, ele também morre
+        # quando o app principal encerra, mesmo que fique órfão aqui.
         if self._settings_process is not None and self._settings_process.poll() is None:
             self._settings_process.terminate()
 

@@ -27,7 +27,19 @@ _SECTIONS = [
 WINDOW_TITLE = "Configurações - WyrmPlayer Control"
 
 
-def main(page: ft.Page) -> None:
+async def main(page: ft.Page) -> None:
+    # Manda o estado escondido ANTES de esperar o engine ficar "pronto pra
+    # mostrar" — se essa propriedade só chega ao cliente nativo depois desse
+    # handshake, existe uma janela de tempo em que ele pode pintar um frame
+    # com os valores padrão (marca do Flet, frame em branco) antes de aplicar
+    # o que pedimos.
+    page.window.visible = False
+    page.update()
+
+    # Só agora sincroniza com o engine nativo, já com o estado escondido em
+    # trânsito/aplicado.
+    await page.window.wait_until_ready_to_show()  # type: ignore[no-untyped-call]
+
     # --- Setup Inicial ---
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         base_dir = Path(cast(str, sys._MEIPASS))
@@ -37,6 +49,8 @@ def main(page: ft.Page) -> None:
     settings_icon = str(base_dir / os.path.join("assets", "icon.ico"))
     assets_dir = base_dir / "assets"
 
+    # Janela já está escondida (setado no topo desta função) e só é revelada
+    # no fim, já com título/ícone/tema/conteúdo aplicados.
     page.title = WINDOW_TITLE
     page.window.icon = settings_icon
     page.window.width, page.window.height = 720, 620
@@ -111,7 +125,7 @@ def main(page: ft.Page) -> None:
     tab_gen = general_tab(cfg, on_ui_change)
     tab_hot = hotkeys_tab(cfg, save_settings, status_text)
     tab_lay = layout_tab(cfg, on_ui_change)
-    tab_int = integrations_tab(cfg, on_ui_change)
+    tab_int = integrations_tab(cfg, on_ui_change, page)
     tab_adv = advanced_tab(cfg, on_ui_change)
 
     panels: dict[str, ft.Control] = {
@@ -201,6 +215,10 @@ def main(page: ft.Page) -> None:
 
     _select_section("geral")
 
+    # Só agora, com tudo pronto, a janela aparece de fato.
+    page.window.visible = True
+    page.update()
+
 
 if __name__ == "__main__":
-    ft.run(main=main)
+    ft.run(main=main, view=ft.AppView.FLET_APP_HIDDEN)

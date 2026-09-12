@@ -54,66 +54,7 @@ def _handle_configure_spotify() -> None:
     Roda na thread do ícone da tray (pystray), não na loop asyncio — chamadas
     bloqueantes (subprocess, MessageBoxW) aqui são seguras e esperadas.
     """
-    cfg = cfg_manager.load()
-    status = spotify_setup.check_status(cfg.websocket_port)
-
-    if status.spotify_is_microsoft_store:
-        win32.info_dialog(
-            "Spotify",
-            "O Spotify instalado é a versão da Microsoft Store, que não é compatível "
-            "com o Spicetify. Desinstale-a e instale a versão oficial em "
-            "https://www.spotify.com/download para usar a integração.",
-        )
-        return
-
-    if status.spicetify_path is None:
-        win32.info_dialog(
-            "Spotify",
-            "Spicetify não foi encontrado. Instale-o manualmente em "
-            "https://spicetify.app e tente novamente.",
-        )
-        return
-
-    if not status.port_matches:
-        win32.info_dialog(
-            "Spotify",
-            f"A porta configurada ({cfg.websocket_port}) não é a esperada pela extensão "
-            f"do Spicetify ({spotify_setup.WEBNOWPLAYING_PORT}). Ajuste 'websocket_port' "
-            "em settings.json e reinicie o app antes de continuar.",
-        )
-        return
-
-    avoid_admin = win32.is_process_elevated()
-    if avoid_admin:
-        logger.info(
-            "Spotify setup: WyrmPlayerControl está rodando como administrador; o Spicetify "
-            "será rodado sem privilégios administrativos (tarefa agendada temporária)."
-        )
-
-    if not status.extension_enabled and not spotify_setup.configure_extension(
-        status.spicetify_path, avoid_admin=avoid_admin
-    ):
-        win32.info_dialog("Spotify", "Falha ao configurar a extensão. Veja o log para detalhes.")
-        return
-
-    proceed = win32.confirm_dialog(
-        "Spotify",
-        "Isso vai reiniciar o cliente do Spotify para aplicar a integração. Continuar?",
-        warning=True,
-    )
-    if not proceed:
-        logger.info("Spotify setup: usuário cancelou a aplicação (spicetify apply).")
-        win32.info_dialog(
-            "Spotify",
-            "Configuração cancelada. A extensão já está registrada no Spicetify; "
-            "aplique quando quiser clicando novamente em 'Configurar Spotify' na tray.",
-        )
-        return
-
-    if spotify_setup.apply_changes(status.spicetify_path, avoid_admin=avoid_admin):
-        win32.info_dialog("Spotify", "Integração aplicada com sucesso.")
-    else:
-        win32.info_dialog("Spotify", "Falha ao aplicar as mudanças. Veja o log para detalhes.")
+    spotify_setup.run_interactive_setup(cfg_manager.load().websocket_port)
 
 
 async def app_main(page: ft.Page) -> None:
@@ -215,14 +156,30 @@ async def app_main(page: ft.Page) -> None:
         hotkeys.stop()
         tray.stop()
 
+        # Fecha a janela nativa do HUD de verdade (em vez de só encerrar o processo)
+        # para o próprio Flet rodar seu cleanup (close_flet_view) e não deixar o
+        # flet.exe do HUD órfão. ft.run() fica bloqueado em fvp.wait() até a janela
+        # nativa fechar, então sem isso o processo nunca sairia sozinho.
+        try:
+            await asyncio.wait_for(page.window.destroy(), timeout=2.0)  # type: ignore[no-untyped-call]
+        except Exception as e:
+            logger.warning(f"Falha ao fechar a janela do HUD graciosamente: {e}")
+
         logger.info("Controlador encerrado com sucesso.")
         single_instance.unlock()
+        # Rede de segurança: se algo acima travar (ex.: destroy() não retornou a
+        # tempo), garante que o processo termina de qualquer forma. O Job Object
+        # criado em win32.create_orphan_safeguard_job() cuida de matar qualquer
+        # flet.exe (HUD ou Configurações) que ainda esteja de pé nesse ponto.
         os._exit(0)
 
 
 if __name__ == "__main__":
     if "--settings" in sys.argv:
-        ft.run(main=settings_main)
+        # Também roda escondido até o próprio settings_main revelar a janela já
+        # totalmente configurada (título, ícone, tema) — evita o flash da marca
+        # padrão do Flet antes do conteúdo carregar.
+        ft.run(main=settings_main, view=ft.AppView.FLET_APP_HIDDEN)
         sys.exit(0)
 
     if win32.relaunch_as_admin_if_needed(sys.argv):
@@ -231,6 +188,12 @@ if __name__ == "__main__":
     if not single_instance.lock():
         logger.warning("Another instance is already running. Exiting.")
         sys.exit(1)
+
+    # Rede de segurança contra processos/janelas órfãos (ex.: flet.exe do HUD ou
+    # da janela de Configurações preso mostrando "carregando" para sempre): se
+    # este processo morrer por qualquer motivo, o Windows mata tudo que foi
+    # criado a partir dele. Ver src.infrastructure.win32.create_orphan_safeguard_job.
+    win32.create_orphan_safeguard_job()
 
     try:
         ft.run(

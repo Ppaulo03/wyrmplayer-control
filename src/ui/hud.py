@@ -24,6 +24,7 @@ class MusicHUD:
         self._hide_task: asyncio.Task[None] | None = None
         self._window_width: int = 380
         self._window_height: int = 120
+        self._stealth_applied = False
 
         # UI Elements
         self.cover: ft.Image
@@ -46,8 +47,20 @@ class MusicHUD:
         return width, height
 
     def _apply_stealth(self) -> None:
-        """Aplica decoradores de janela transparente/topmost."""
-        win32.apply_window_stealth("Music HUD")
+        """
+        Aplica decoradores de janela transparente/topmost.
+
+        apply_window_stealth() mexe em GWL_STYLE/GWL_EXSTYLE via SetWindowLongW e
+        força SetWindowPos(SWP_FRAMECHANGED) — isso é pesado o bastante para
+        Windows repintar a non-client area, e chamado toda vez que a HUD aparece
+        (main() e cada show_hud()) causava um flash visível de tela em branco
+        logo após o boot. Os estilos são idempotentes (uma vez sem borda/caption/
+        topmost, continuam assim), então só precisam ser aplicados na primeira
+        vez; force_topmost() é barato e continua sendo reforçado a cada exibição.
+        """
+        if not self._stealth_applied:
+            win32.apply_window_stealth("Music HUD")
+            self._stealth_applied = True
         win32.force_topmost("Music HUD")
 
     def _get_layout(self) -> tuple[int, int, int, int]:
@@ -75,11 +88,30 @@ class MusicHUD:
     async def main(self, page: ft.Page) -> None:
         """Configuração da página Flet com todos os indicadores visuais."""
         self.page = page
+
+        # Manda o estado invisível/fora da tela ANTES de esperar o engine ficar
+        # "pronto pra mostrar" — se essas propriedades só chegam ao cliente
+        # nativo depois desse handshake, existe uma janela de tempo em que ele
+        # pode pintar um frame com os valores padrão (posição central, visível)
+        # antes de aplicar o que pedimos.
         self.page.title = "Music HUD"
         self.page.window.left = -32000
         self.page.window.top = -32000
         self.page.window.visible = False
         self.page.window.opacity = 0.0
+        self.page.update()
+
+        # Só agora sincroniza com o engine nativo, já com o estado escondido
+        # em trânsito/aplicado.
+        await page.window.wait_until_ready_to_show()  # type: ignore[no-untyped-call]
+
+        # Stealth (SetWindowLongW/SetWindowPos via Win32 puro, fora do controle
+        # do Flet) precisa rodar AQUI, enquanto a janela ainda está fora da tela
+        # (-32000,-32000) — qualquer repaint/composição transitória que essas
+        # chamadas causem fica invisível. Se rodasse depois de apply_layout()
+        # (que já move a janela pro canto real da tela), esse mesmo repaint
+        # acontece com a janela já na posição visível, causando um flash rápido.
+        self._apply_stealth()
 
         self.page.window.bgcolor = "#00000000"
         self.page.bgcolor = "#00000000"
@@ -88,7 +120,8 @@ class MusicHUD:
         self.page.window.always_on_top = True
         self.page.window.skip_task_bar = True
         self.page.window.resizable = False
-        # Configurações de tamanho inicial (responsivo)
+        # Configurações de tamanho inicial (responsivo) — só agora move a
+        # janela pra posição real na tela, já com o estilo/topmost aplicados.
         self.apply_layout()
 
         self.page.update()
@@ -187,9 +220,6 @@ class MusicHUD:
         self.state.on_update(self.update_ui)
 
         self.page.update()
-
-        await asyncio.sleep(0.5)
-        self._apply_stealth()
 
     async def update_ui(
         self, major: bool = False, category: StateCategory = StateCategory.ALL

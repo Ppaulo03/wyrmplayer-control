@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # --- Win32 API Centralization ---
 user32 = ctypes.windll.user32 if os.name == "nt" else None
+kernel32 = ctypes.windll.kernel32 if os.name == "nt" else None
 
 if user32:
     user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
@@ -122,6 +123,13 @@ def force_topmost(window_title: str) -> None:
         if not hwnd:
             return
 
+        # Sem SWP_SHOWWINDOW: essa flag força a janela a ficar visível no Win32
+        # mesmo quando page.window.visible do Flet está False — como isso é
+        # chamado logo no boot do HUD (via _apply_stealth em main()), derrubava
+        # a janela "escondida até show_hud()" por baixo do Flet e causava um
+        # flash em branco visível ao abrir o app. Reforçar topmost não deveria,
+        # por si só, mudar a visibilidade — isso é responsabilidade exclusiva
+        # do page.window.visible.
         ctypes.windll.user32.SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -129,7 +137,7 @@ def force_topmost(window_title: str) -> None:
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         )
     except Exception as e:
         logger.warning(f"Win32: Falha ao forçar topmost em '{window_title}': {e}")
@@ -160,6 +168,118 @@ def focus_existing_window(window_title: str) -> bool:
         return True
     except Exception as e:
         logger.warning(f"Win32: Falha ao focar janela '{window_title}': {e}")
+        return False
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+        ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_void_p),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+# Mantém o handle do Job Object vivo pela duração do processo: KILL_ON_JOB_CLOSE só
+# dispara quando o último handle do job é fechado (o que o Windows faz sozinho,
+# mesmo em crash/TerminateProcess/os._exit), então esse handle nunca deve ser
+# fechado manualmente nem deixado ser coletado pelo GC.
+_orphan_safeguard_job: wintypes.HANDLE | None = None
+
+
+def create_orphan_safeguard_job() -> bool:
+    """
+    Cria um Job Object do Windows com KILL_ON_JOB_CLOSE e associa o processo atual
+    a ele. Todo processo filho criado depois (ex.: o subprocesso da janela de
+    Configurações, e o flet.exe nativo que ele e o HUD sobem por trás dos panos)
+    entra automaticamente no mesmo job por herança.
+
+    Se este processo (o app principal) morrer por qualquer motivo — inclusive
+    crash ou kill externo, não só o caminho normal de "Sair" — o Windows fecha o
+    handle do job sozinho e mata todos os processos associados a ele. É a rede de
+    segurança contra janelas/processos órfãos (ex.: um flet.exe preso mostrando
+    "carregando" para sempre) que nenhum cleanup cooperativo do app cobre sozinho.
+    """
+    global _orphan_safeguard_job
+
+    if os_name() != "nt" or kernel32 is None:
+        return False
+
+    try:
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            logger.warning("Win32: CreateJobObjectW falhou; safeguard de órfãos desativado.")
+            return False
+
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            kernel32.CloseHandle(job)
+            logger.warning("Win32: SetInformationJobObject falhou; safeguard de órfãos desativado.")
+            return False
+
+        if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+            kernel32.CloseHandle(job)
+            logger.warning(
+                "Win32: AssignProcessToJobObject falhou; safeguard de órfãos desativado."
+            )
+            return False
+
+        _orphan_safeguard_job = job
+        logger.info("Win32: safeguard de processos órfãos (Job Object) ativado.")
+        return True
+    except Exception as e:
+        logger.warning(f"Win32: Falha ao criar job object de safeguard: {e}")
         return False
 
 
