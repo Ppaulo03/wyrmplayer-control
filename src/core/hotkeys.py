@@ -47,8 +47,11 @@ class HotkeyManager:
         with self._lock:
             if self._active_backend == "keyboard" and not self._keyboard_remove_handlers:
                 return None
-            if self._active_backend == "native" and not self._native_callbacks:
-                return None
+            if self._active_backend == "native":
+                if not self._native_callbacks or not (
+                    self._native_thread and self._native_thread.is_alive()
+                ):
+                    return None
             return self._active_backend
 
     @property
