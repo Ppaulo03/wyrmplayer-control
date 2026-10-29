@@ -1,6 +1,8 @@
 import json
 import os
+import threading
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from src.core import autostart
 from src.core.config import AppConfig, ConfigManager
 from src.ui import theme
+from src.ui.settings import save_settings_from_controls
 
 
 def test_config_defaults(config_manager: ConfigManager) -> None:
@@ -41,7 +44,7 @@ def test_config_filtered_data(config_manager: ConfigManager) -> None:
 
 
 # ==============================================================================
-# EST-02.1: Testes de Persistência Atômica do settings.json
+# EST-02.1 & EST-02.1.1: Testes de Persistência Atômica do settings.json
 # ==============================================================================
 
 
@@ -250,12 +253,189 @@ def test_atomic_save_recovery_after_failure(
     assert loaded.volume_step == 12
 
 
+# ==============================================================================
+# EST-02.1.1 R01: Sincronização de Salvamentos Concorrentes
+# ==============================================================================
+
+
+def test_atomic_save_concurrent_calls_preserve_consistency(
+    config_manager: ConfigManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R01: Duas threads não intercalam replace e atualização de self.config."""
+    # Configuração inicial
+    assert config_manager.save(AppConfig(volume_step=1)) is True
+
+    t1_in_critical = threading.Event()
+    t2_attempted = threading.Event()
+    t1_proceed = threading.Event()
+
+    original_replace = os.replace
+    replace_count = 0
+    replace_lock = threading.Lock()
+
+    def instrumented_replace(src: str, dst: str) -> None:
+        nonlocal replace_count
+        with replace_lock:
+            replace_count += 1
+            current = replace_count
+
+        if current == 1:
+            # Thread 1 alcançou a substituição atômica dentro do lock
+            t1_in_critical.set()
+            # Aguarda Thread 2 tentar executar save() concorrente
+            t2_attempted.wait(timeout=2.0)
+            t1_proceed.wait(timeout=2.0)
+
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", instrumented_replace)
+
+    results: dict[str, bool] = {}
+
+    def thread1_target() -> None:
+        results["t1"] = config_manager.save(AppConfig(volume_step=10))
+
+    def thread2_target() -> None:
+        # Aguarda Thread 1 estar executando
+        t1_in_critical.wait(timeout=2.0)
+        t2_attempted.set()
+        # Thread 2 tenta save() enquanto Thread 1 ainda segura o lock
+        results["t2"] = config_manager.save(AppConfig(volume_step=20))
+
+    t1 = threading.Thread(target=thread1_target)
+    t2 = threading.Thread(target=thread2_target)
+
+    t1.start()
+    t2.start()
+
+    # Confirma que T1 entrou na seção protegida e T2 disparou
+    assert t1_in_critical.wait(timeout=2.0) is True
+    assert t2_attempted.wait(timeout=2.0) is True
+
+    # Libera T1 para concluir seu ciclo completo
+    t1_proceed.set()
+
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert results.get("t1") is True
+    assert results.get("t2") is True
+
+    # Como as operações foram serializadas pelo lock, o estado final em memória
+    # e em disco devem ser rigorosamente coerentes com a última operação concluída
+    final_mem = config_manager.config.volume_step
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        disk_data = json.load(f)
+    final_disk = disk_data["volume_step"]
+
+    assert final_mem == final_disk
+    # Não há resíduos temporários
+    parent_dir = Path(config_manager.config_path).parent
+    assert list(parent_dir.glob(".*.tmp.*")) == []
+
+
+def test_atomic_save_multiple_threads_barrier(config_manager: ConfigManager) -> None:
+    """R01: Múltiplas threads concorrentes serializadas por lock sem corrupção e sem deadlocks."""
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
+    results: list[bool] = [False] * thread_count
+
+    def worker(idx: int) -> None:
+        barrier.wait(timeout=2.0)
+        res = config_manager.save(AppConfig(volume_step=idx * 10))
+        results[idx] = res
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=3.0)
+        assert not t.is_alive()
+
+    # Todas as threads conseguiram salvar
+    assert all(results)
+
+    # Estado em memória e disco perfeitamente sincronizados
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        disk_cfg = json.load(f)
+    assert config_manager.config.volume_step == disk_cfg["volume_step"]
+
+
+# ==============================================================================
+# EST-02.1.1 R02: Tratamento de Falhas na Criação do Diretório
+# ==============================================================================
+
+
+def test_atomic_save_makedirs_failure_handled_gracefully(
+    config_manager: ConfigManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R02: Falha em os.makedirs retorna False sem exceção, preservando arquivo e estado."""
+    cfg_initial = AppConfig(volume_step=5)
+    assert config_manager.save(cfg_initial) is True
+
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        original_content = f.read()
+
+    # Simula falha de permissão ao criar o diretório
+    monkeypatch.setattr(
+        os, "makedirs", MagicMock(side_effect=PermissionError("Acesso negado ao diretório"))
+    )
+
+    cfg_new = AppConfig(volume_step=99)
+    # A chamada NÃO deve propagar PermissionError
+    res = config_manager.save(cfg_new)
+
+    # 1. Retorna False conforme contrato
+    assert res is False
+
+    # 2. Estado interno permanece inalterado
+    assert config_manager.config.volume_step == 5
+
+    # 3. Arquivo em disco permanece intacto
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        assert f.read() == original_content
+
+    # 4. Nenhum temporário criado ou residual
+    parent_dir = Path(config_manager.config_path).parent
+    assert list(parent_dir.glob(".*.tmp.*")) == []
+
+    # 5. Recuperação: remove a falha e confirma que o próximo save funciona normalmente
+    monkeypatch.undo()
+    assert config_manager.save(AppConfig(volume_step=14)) is True
+    assert config_manager.config.volume_step == 14
+    loaded = config_manager.load()
+    assert loaded.volume_step == 14
+
+
+# ==============================================================================
+# EST-02.1.1 R04: Teste Real do Consumidor da Interface (save_settings_from_controls)
+# ==============================================================================
+
+
+class _FakeField:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+class _FakeSwitch:
+    def __init__(self, data: Any) -> None:
+        self.data = data
+
+
+class _FakeTab:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+
 def test_ui_settings_consumer_handles_save_failure_and_success(
     config_manager: ConfigManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cenário I: Interface reflete erro sem falsos sucessos e sem efeitos colaterais."""
-    # Simula componentes de interface da tela de configurações
+    """R04: Testa diretamente o fluxo de produção de save_settings_from_controls."""
     status_text = theme.mono("salvamento automático ativo", size=10.5, color=theme.POSITIVE)
     status_dot = theme.diamond(5, theme.POSITIVE)
     page_mock = MagicMock()
@@ -267,38 +447,55 @@ def test_ui_settings_consumer_handles_save_failure_and_success(
 
     monkeypatch.setattr(autostart, "sync", mock_sync)
 
-    # Função representativa do save_settings em src/ui/settings.py
-    def simulate_save_settings(target_cfg: AppConfig) -> bool:
-        saved = config_manager.save(target_cfg)
-        if not saved:
-            status_text.value = "erro ao salvar configurações"
-            status_text.color = theme.DANGER
-            status_dot.bgcolor = theme.DANGER
-            page_mock.update()
-            return False
-
-        autostart.sync(
-            target_cfg.start_with_windows, elevated=target_cfg.start_with_windows_elevated
-        )
-        status_text.value = "salvamento automático ativo"
-        status_text.color = theme.POSITIVE
-        status_dot.bgcolor = theme.POSITIVE
-        page_mock.update()
-        return True
+    tab_gen = _FakeTab(
+        {
+            "volume_step": _FakeField("10"),
+            "hud_display_time": _FakeField("3"),
+            "start_with_windows": _FakeSwitch(True),
+            "start_with_windows_elevated": _FakeSwitch(False),
+        }
+    )
+    tab_hot = _FakeTab({"play_pause": _FakeField("alt gr+p")})
+    tab_lay = _FakeTab(
+        {
+            "hud_monitor": _FakeField("0"),
+            "hud_position": _FakeField("bottom_right"),
+            "volume": _FakeSwitch(True),
+            "metadata": _FakeSwitch(True),
+            "playback": _FakeSwitch(True),
+        }
+    )
+    tab_int = _FakeTab({"spotify_integration": _FakeSwitch(False)})
+    tab_adv = _FakeTab(
+        {
+            "websocket_port": _FakeField("8974"),
+            "log_level": _FakeField("INFO"),
+            "log_file": _FakeField("wyrmplayer.log"),
+        }
+    )
 
     real_replace = os.replace
     should_fail_replace = True
 
     def conditional_replace(src: str, dst: str) -> None:
         if should_fail_replace:
-            raise OSError("Falha no disco")
+            raise OSError("Falha no disco simulada")
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", conditional_replace)
 
-    # 1. Simula falha na gravação
-    bad_cfg = AppConfig(volume_step=99, start_with_windows=True)
-    res_fail = simulate_save_settings(bad_cfg)
+    # 1. Executa a função real de produção com falha simulada no save
+    res_fail = save_settings_from_controls(
+        config_manager,
+        tab_gen,
+        tab_hot,
+        tab_lay,
+        tab_int,
+        tab_adv,
+        status_text,
+        status_dot,
+        page_mock,
+    )
 
     assert res_fail is False
     # Interface indica erro
@@ -308,15 +505,24 @@ def test_ui_settings_consumer_handles_save_failure_and_success(
     # Efeito colateral de autostart NÃO foi aplicado
     assert len(sync_calls) == 0
 
-    # 2. Simula recuperação com sucesso
+    # 2. Executa a função real de produção com sucesso
     should_fail_replace = False
-    good_cfg = AppConfig(volume_step=10, start_with_windows=True, start_with_windows_elevated=False)
-    res_ok = simulate_save_settings(good_cfg)
+    res_ok = save_settings_from_controls(
+        config_manager,
+        tab_gen,
+        tab_hot,
+        tab_lay,
+        tab_int,
+        tab_adv,
+        status_text,
+        status_dot,
+        page_mock,
+    )
 
     assert res_ok is True
     # Interface indica sucesso
     assert status_text.value == "salvamento automático ativo"
     assert status_text.color == theme.POSITIVE
     assert status_dot.bgcolor == theme.POSITIVE
-    # Efeito colateral foi aplicado
+    # Efeito colateral foi devidamente aplicado com os valores dos controles
     assert sync_calls == [(True, False)]

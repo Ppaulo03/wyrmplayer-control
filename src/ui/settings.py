@@ -27,6 +27,68 @@ _SECTIONS = [
 WINDOW_TITLE = "Configurações - WyrmPlayer Control"
 
 
+def save_settings_from_controls(
+    config_manager: ConfigManager,
+    tab_gen: Any,
+    tab_hot: Any,
+    tab_lay: Any,
+    tab_int: Any,
+    tab_adv: Any,
+    status_text: ft.Text,
+    status_dot: ft.Container,
+    page: ft.Page | None = None,
+) -> bool:
+    """Coleta os valores das seções da UI, salva as configurações e atualiza status."""
+    try:
+        g_data = getattr(tab_gen, "data", {})
+        h_data = getattr(tab_hot, "data", {})
+        l_data = getattr(tab_lay, "data", {})
+        i_data = getattr(tab_int, "data", {})
+        a_data = getattr(tab_adv, "data", {})
+
+        new_cfg = AppConfig(
+            volume_step=int(g_data["volume_step"].value or 5),
+            hud_display_time=int(g_data["hud_display_time"].value or 3),
+            websocket_port=int(a_data["websocket_port"].value or 8974),
+            log_level=str(a_data["log_level"].value or "INFO").upper(),
+            log_file=(a_data["log_file"].value or "wyrmplayer.log").strip(),
+            spotify_integration=bool(i_data["spotify_integration"].data),
+            start_with_windows=bool(g_data["start_with_windows"].data),
+            start_with_windows_elevated=bool(g_data["start_with_windows_elevated"].data),
+            hud_monitor=int(l_data["hud_monitor"].value or 0),
+            hud_position=l_data["hud_position"].value or "bottom_right",
+            hotkeys={k: (v.value or "").strip() for k, v in h_data.items()},
+            triggers={
+                "volume": bool(l_data["volume"].data),
+                "metadata": bool(l_data["metadata"].data),
+                "playback": bool(l_data["playback"].data),
+            },
+        )
+        saved = config_manager.save(new_cfg)
+        if not saved:
+            status_text.value = "erro ao salvar configurações"
+            status_text.color = theme.DANGER
+            status_dot.bgcolor = theme.DANGER
+            if page:
+                page.update()
+            return False
+
+        autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
+        status_text.value = "salvamento automático ativo"
+        status_text.color = theme.POSITIVE
+        status_dot.bgcolor = theme.POSITIVE
+        if page:
+            page.update()
+        return True
+    except Exception as e:
+        status_text.value = f"erro ao salvar: {e}"
+        status_text.color = theme.DANGER
+        status_dot.bgcolor = theme.DANGER
+        if page:
+            page.update()
+        return False
+
+
 async def main(page: ft.Page) -> None:
     # Manda o estado escondido ANTES de esperar o engine ficar "pronto pra
     # mostrar" — se essa propriedade só chega ao cliente nativo depois desse
@@ -81,51 +143,17 @@ async def main(page: ft.Page) -> None:
 
     # --- Lógica de Salvamento ---
     def save_settings() -> bool:
-        try:
-            g_data = getattr(tab_gen, "data", {})
-            h_data = getattr(tab_hot, "data", {})
-            l_data = getattr(tab_lay, "data", {})
-            i_data = getattr(tab_int, "data", {})
-            a_data = getattr(tab_adv, "data", {})
-
-            new_cfg = AppConfig(
-                volume_step=int(g_data["volume_step"].value or 5),
-                hud_display_time=int(g_data["hud_display_time"].value or 3),
-                websocket_port=int(a_data["websocket_port"].value or 8974),
-                log_level=str(a_data["log_level"].value or "INFO").upper(),
-                log_file=(a_data["log_file"].value or "wyrmplayer.log").strip(),
-                spotify_integration=bool(i_data["spotify_integration"].data),
-                start_with_windows=bool(g_data["start_with_windows"].data),
-                start_with_windows_elevated=bool(g_data["start_with_windows_elevated"].data),
-                hud_monitor=int(l_data["hud_monitor"].value or 0),
-                hud_position=l_data["hud_position"].value or "bottom_right",
-                hotkeys={k: (v.value or "").strip() for k, v in h_data.items()},
-                triggers={
-                    "volume": bool(l_data["volume"].data),
-                    "metadata": bool(l_data["metadata"].data),
-                    "playback": bool(l_data["playback"].data),
-                },
-            )
-            saved = config_manager.save(new_cfg)
-            if not saved:
-                status_text.value = "erro ao salvar configurações"
-                status_text.color = theme.DANGER
-                status_dot.bgcolor = theme.DANGER
-                page.update()
-                return False
-
-            autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
-            status_text.value = "salvamento automático ativo"
-            status_text.color = theme.POSITIVE
-            status_dot.bgcolor = theme.POSITIVE
-            page.update()
-            return True
-        except Exception as e:
-            status_text.value = f"erro ao salvar: {e}"
-            status_text.color = theme.DANGER
-            status_dot.bgcolor = theme.DANGER
-            page.update()
-            return False
+        return save_settings_from_controls(
+            config_manager,
+            tab_gen,
+            tab_hot,
+            tab_lay,
+            tab_int,
+            tab_adv,
+            status_text,
+            status_dot,
+            page,
+        )
 
     def on_ui_change(e: Any) -> None:
         save_settings()
