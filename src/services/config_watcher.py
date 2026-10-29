@@ -28,6 +28,7 @@ class ConfigWatcher:
         on_websocket_port_change: Callable[[int], Awaitable[None]],
         on_spotify_integration_change: Callable[[], None],
         max_transient_retries: int = 5,
+        retry_cooldown_seconds: float = 30.0,
     ):
         self.hotkeys = hotkeys
         self.hud = hud
@@ -37,6 +38,7 @@ class ConfigWatcher:
         self.on_spotify_integration_change = on_spotify_integration_change
         self.settings_path = config.config_path
         self.max_transient_retries = max_transient_retries
+        self.retry_cooldown_seconds = retry_cooldown_seconds
 
         # Internal state
         self.last_mtime: float | None = None
@@ -51,6 +53,7 @@ class ConfigWatcher:
         # Transient retry tracking
         self._transient_retry_count: int = 0
         self._last_failed_mtime: float | None = None
+        self._next_retry_time: float = 0.0
 
         # Debounce/Windows Session state
         self.raw_input_desktop_accessible = hotkeys.is_input_desktop_accessible()
@@ -65,6 +68,8 @@ class ConfigWatcher:
             try:
                 if getattr(self.config, "last_error_category", None) == ERROR_CATEGORY_TRANSIENT_IO:
                     self.last_mtime = None
+                    self._last_failed_mtime = os.path.getmtime(self.settings_path)
+                    self._transient_retry_count = 1
                 else:
                     self.last_mtime = os.path.getmtime(self.settings_path)
             except OSError:
@@ -120,6 +125,16 @@ class ConfigWatcher:
         if self.last_mtime is not None and current_mtime <= self.last_mtime:
             return
 
+        # Se o arquivo foi modificado (novo mtime), reseta o controle de retries
+        if current_mtime != self._last_failed_mtime:
+            self._last_failed_mtime = current_mtime
+            self._transient_retry_count = 0
+            self._next_retry_time = 0.0
+        elif self._transient_retry_count >= self.max_transient_retries:
+            # Mesmo mtime em modo de recuperação periódica: respeita o período de espera
+            if time.monotonic() < self._next_retry_time:
+                return
+
         # Sincronização e detecção real
         try:
             old_layout = self.last_hud_layout
@@ -128,10 +143,6 @@ class ConfigWatcher:
             if not getattr(self.config, "last_load_succeeded", True):
                 error_category = getattr(self.config, "last_error_category", None)
                 if error_category == ERROR_CATEGORY_TRANSIENT_IO:
-                    if self._last_failed_mtime != current_mtime:
-                        self._last_failed_mtime = current_mtime
-                        self._transient_retry_count = 0
-
                     self._transient_retry_count += 1
                     if self._transient_retry_count < self.max_transient_retries:
                         if self._transient_retry_count == 1:
@@ -153,20 +164,32 @@ class ConfigWatcher:
                         # Não atualiza self.last_mtime para permitir nova tentativa
                         return
 
-                    # Limite de tentativas atingido: avança mtime para cessar retries
-                    self.last_mtime = current_mtime
-                    logger.error(
-                        "Limite de %d tentativas de leitura atingido para %s. "
-                        "Mantendo a configuração anterior até nova alteração do arquivo.",
-                        self.max_transient_retries,
-                        self.settings_path,
-                    )
+                    # Limite de tentativas imediatas atingido: agenda próxima tentativa com cooldown
+                    self._next_retry_time = time.monotonic() + self.retry_cooldown_seconds
+                    if self._transient_retry_count == self.max_transient_retries:
+                        logger.warning(
+                            "Tentativas imediatas de leitura esgotadas para %s (%d tentativas). "
+                            "Entrando em modo de recuperação periódica a cada %.1fs. "
+                            "Mantendo a configuração anterior em execução.",
+                            self.settings_path,
+                            self.max_transient_retries,
+                            self.retry_cooldown_seconds,
+                        )
+                    else:
+                        logger.debug(
+                            "Tentativa periódica de recuperação para %s falhou. "
+                            "Próxima tentativa em %.1fs.",
+                            self.settings_path,
+                            self.retry_cooldown_seconds,
+                        )
+                    # Não atualiza self.last_mtime para manter a recuperação ativa
                     return
 
                 # Falha por conteúdo inválido (JSONDecodeError, UnicodeDecodeError, etc.)
                 self.last_mtime = current_mtime
                 self._transient_retry_count = 0
                 self._last_failed_mtime = None
+                self._next_retry_time = 0.0
                 logger.warning(
                     "Alteração detectada em %s, mas o conteúdo é inválido ou ilegível. "
                     "Mantendo a configuração atual em execução.",
@@ -174,12 +197,24 @@ class ConfigWatcher:
                 )
                 return
 
-            # Carga bem-sucedida: atualiza mtime e reseta rastreamento de retry
+            # Carga bem-sucedida: atualiza mtime e limpa todo estado de retry/recuperação
+            recovered_from_transient = self._transient_retry_count > 0
             self.last_mtime = current_mtime
             self._transient_retry_count = 0
             self._last_failed_mtime = None
+            self._next_retry_time = 0.0
 
-            logger.info("Mudança de arquivo detectada! mtime: %s. Recarregando...", self.last_mtime)
+            if recovered_from_transient:
+                logger.info(
+                    "Configuração recuperada com sucesso após falha temporária em %s. "
+                    "Aplicando novos parâmetros.",
+                    self.settings_path,
+                )
+            else:
+                logger.info(
+                    "Mudança de arquivo detectada! mtime: %s. Recarregando...",
+                    self.last_mtime,
+                )
 
             # Hotkeys change
             if cfg.hotkeys != self.last_hotkeys:

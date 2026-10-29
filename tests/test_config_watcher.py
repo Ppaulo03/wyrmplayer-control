@@ -43,9 +43,13 @@ def watcher(config_manager: MagicMock) -> ConfigWatcher:
 
 
 def _touch_settings_file(watcher: ConfigWatcher) -> None:
-    """Garante um mtime maior que o registrado em last_mtime."""
+    """Garante um mtime maior que o registrado em last_mtime e no histórico de falhas."""
     current = os.path.getmtime(watcher.settings_path)
-    ref_time = max(current, watcher.last_mtime or 0.0)
+    ref_time = max(
+        current,
+        watcher.last_mtime or 0.0,
+        getattr(watcher, "_last_failed_mtime", 0.0) or 0.0,
+    )
     new_time = ref_time + 1.0
     os.utime(watcher.settings_path, (new_time, new_time))
 
@@ -467,13 +471,14 @@ async def test_transient_failure_and_recovery_lifecycle_integrity(
     assert settings_path.read_text(encoding="utf-8") == new_cfg_content
 
 
-async def test_transient_failure_retry_limit_exhaustion(
+async def test_initial_retry_exhaustion_schedules_cooldown_without_abandoning_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R02 - Teste 5: Quando o erro transitório persiste além do limite de tentativas,
-    o watcher cessa as tentativas para aquele timestamp e volta a aceitar nova alteração.
+    """EST-02.2A.2 - Teste 1: Esgotar as tentativas iniciais entra em cooldown
+    e agenda a próxima tentativa, sem marcar o arquivo como processado.
     """
     import json
+    import time
     from typing import Any
 
     settings_path = tmp_path / "settings.json"
@@ -482,29 +487,25 @@ async def test_transient_failure_retry_limit_exhaustion(
     initial_cfg = AppConfig(websocket_port=8974)
     assert real_config_manager.save(initial_cfg) is True
 
-    mock_hotkeys = MagicMock()
-    mock_hotkeys.is_input_desktop_accessible.return_value = True
-    mock_hud = MagicMock()
-    on_ws_change = AsyncMock()
-    on_spotify_change = MagicMock()
+    fake_now = 1000.0
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now)
 
-    # Configura watcher com limite de 3 tentativas
     watcher = ConfigWatcher(
-        hotkeys=mock_hotkeys,
-        hud=mock_hud,
+        hotkeys=MagicMock(),
+        hud=MagicMock(),
         state=AppState(),
         config=real_config_manager,
-        on_websocket_port_change=on_ws_change,
-        on_spotify_integration_change=on_spotify_change,
+        on_websocket_port_change=AsyncMock(),
+        on_spotify_integration_change=MagicMock(),
         max_transient_retries=3,
+        retry_cooldown_seconds=30.0,
     )
 
-    # Atualiza arquivo
     settings_path.write_text(json.dumps({"websocket_port": 9800}), encoding="utf-8")
     _touch_settings_file(watcher)
     failing_mtime = os.path.getmtime(watcher.settings_path)
 
-    # Simula falha contínua de I/O
+    # Simula erro de I/O transitório contínuo
     original_open = open
 
     def failing_open(file: Any, *args: Any, **kwargs: Any) -> Any:
@@ -514,43 +515,395 @@ async def test_transient_failure_retry_limit_exhaustion(
 
     monkeypatch.setattr("builtins.open", failing_open)
 
-    # Tentativa 1
-    await watcher._check_config_file()
-    assert watcher.last_mtime != failing_mtime
+    # Executa as 3 tentativas iniciais
+    await watcher._check_config_file()  # tentativa 1
     assert watcher._transient_retry_count == 1
-
-    # Tentativa 2
-    await watcher._check_config_file()
     assert watcher.last_mtime != failing_mtime
+
+    await watcher._check_config_file()  # tentativa 2
     assert watcher._transient_retry_count == 2
+    assert watcher.last_mtime != failing_mtime
 
-    # Tentativa 3: atinge o limite
-    await watcher._check_config_file()
+    await watcher._check_config_file()  # tentativa 3 (atinge max_transient_retries)
     assert watcher._transient_retry_count == 3
-    # Limite atingido: avança last_mtime para parar retries deste timestamp
-    assert watcher.last_mtime == failing_mtime
+    # Crucial: o arquivo NÃO foi considerado aplicado (last_mtime NÃO é atualizado)
+    assert watcher.last_mtime != failing_mtime
+    # Próxima tentativa agendada para fake_now + 30.0
+    assert watcher._next_retry_time == fake_now + 30.0
+    assert real_config_manager.config.websocket_port == 8974
 
-    # Tentativa 4: não deve mais tentar reload para o mesmo timestamp
-    reload_called = False
+
+async def test_recovery_after_cooldown_without_new_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EST-02.2A.2 - Teste 2 (Principal): Após esgotar tentativas iniciais e entrar
+    em cooldown, restaurar o acesso e avançar o tempo permite recuperação completa
+    sem nova modificação no arquivo.
+    """
+    import json
+    import time
+    from typing import Any
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974)
+    assert real_config_manager.save(initial_cfg) is True
+
+    fake_now = 1000.0
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now)
+
+    on_ws_change = AsyncMock()
+    watcher = ConfigWatcher(
+        hotkeys=MagicMock(),
+        hud=MagicMock(),
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=MagicMock(),
+        max_transient_retries=3,
+        retry_cooldown_seconds=30.0,
+    )
+
+    valid_new_json = json.dumps({"websocket_port": 9800})
+    settings_path.write_text(valid_new_json, encoding="utf-8")
+    _touch_settings_file(watcher)
+    target_mtime = os.path.getmtime(watcher.settings_path)
+
+    # 1. Simula erro de I/O transitório durante as tentativas iniciais
+    original_open = open
+
+    def failing_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(file) == str(settings_path) and ("r" in args or kwargs.get("mode", "r") == "r"):
+            raise PermissionError("Arquivo bloqueado temporariamente")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+
+    for _ in range(3):
+        await watcher._check_config_file()
+
+    assert watcher._transient_retry_count == 3
+    assert watcher.last_mtime != target_mtime
+    on_ws_change.assert_not_awaited()
+
+    # 2. Durante o cooldown, checagens sem avanço de tempo não executam reload
+    await watcher._check_config_file()
+    on_ws_change.assert_not_awaited()
+
+    # 3. Restaura o acesso ao arquivo (sem tocar no arquivo, mesmo timestamp)
+    monkeypatch.setattr("builtins.open", original_open)
+    assert os.path.getmtime(watcher.settings_path) == target_mtime
+    assert settings_path.read_text(encoding="utf-8") == valid_new_json
+
+    # 4. Avança o tempo simulado para além do cooldown (fake_now + 35.0 > 1030.0)
+    fake_now = 1035.0
+
+    # 5. Executa novamente _check_config_file()
+    await watcher._check_config_file()
+
+    # 6 e 7. Confirmar que a leitura ocorreu e nova configuração foi aplicada
+    on_ws_change.assert_awaited_once_with(9800)
+    assert watcher.last_websocket_port == 9800
+    assert real_config_manager.config.websocket_port == 9800
+
+    # 8. Confirmar que o estado de retry foi limpo
+    assert watcher._transient_retry_count == 0
+    assert watcher._last_failed_mtime is None
+    assert watcher._next_retry_time == 0.0
+
+    # 9. Confirmar que o timestamp foi reconhecido como processado
+    assert watcher.last_mtime == target_mtime
+
+    # 10. Confirmar que verificações adicionais não geram callbacks duplicados
+    await watcher._check_config_file()
+    assert on_ws_change.await_count == 1
+
+
+async def test_prolonged_failure_continues_periodic_retries_across_multiple_intervals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EST-02.2A.2 - Teste 3: Indisponibilidade persistente do arquivo continua
+    sendo retentada periodicamente após cada período de cooldown sem abandono.
+    """
+    import json
+    import time
+    from typing import Any
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974)
+    assert real_config_manager.save(initial_cfg) is True
+
+    fake_now = 2000.0
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now)
+
+    on_ws_change = AsyncMock()
+    watcher = ConfigWatcher(
+        hotkeys=MagicMock(),
+        hud=MagicMock(),
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=MagicMock(),
+        max_transient_retries=2,
+        retry_cooldown_seconds=30.0,
+    )
+
+    settings_path.write_text(json.dumps({"websocket_port": 9850}), encoding="utf-8")
+    _touch_settings_file(watcher)
+    target_mtime = os.path.getmtime(watcher.settings_path)
+
+    reload_call_count = 0
+    original_open = open
+
+    def failing_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal reload_call_count
+        if str(file) == str(settings_path) and ("r" in args or kwargs.get("mode", "r") == "r"):
+            reload_call_count += 1
+            raise OSError("Falha persistente de disco")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+
+    # 2 tentativas iniciais
+    await watcher._check_config_file()
+    await watcher._check_config_file()
+    assert reload_call_count == 2
+    assert watcher._transient_retry_count == 2
+    assert watcher._next_retry_time == 2030.0
+
+    # Durante o 1º cooldown (t=2010), não deve tentar ler
+    fake_now = 2010.0
+    await watcher._check_config_file()
+    assert reload_call_count == 2
+
+    # Expira o 1º cooldown (t=2031): deve tentar novamente
+    fake_now = 2031.0
+    await watcher._check_config_file()
+    assert reload_call_count == 3
+    assert watcher._transient_retry_count == 3
+    # Agenda o 2º cooldown
+    assert watcher._next_retry_time == 2061.0
+
+    # Durante o 2º cooldown (t=2050), não deve tentar ler
+    fake_now = 2050.0
+    await watcher._check_config_file()
+    assert reload_call_count == 3
+
+    # Expira o 2º cooldown (t=2062): deve tentar novamente
+    fake_now = 2062.0
+    await watcher._check_config_file()
+    assert reload_call_count == 4
+    assert watcher._transient_retry_count == 4
+    assert watcher._next_retry_time == 2092.0
+
+    # O arquivo continua elegível (não foi abandonado)
+    assert watcher.last_mtime != target_mtime
+    on_ws_change.assert_not_awaited()
+
+    # Agora o acesso é restabelecido no 3º intervalo
+    monkeypatch.setattr("builtins.open", original_open)
+    fake_now = 2095.0
+    await watcher._check_config_file()
+
+    # Recuperação com sucesso
+    on_ws_change.assert_awaited_once_with(9850)
+    assert watcher.last_mtime == target_mtime
+    assert watcher._transient_retry_count == 0
+    assert watcher._next_retry_time == 0.0
+
+
+async def test_new_file_modification_during_cooldown_bypasses_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EST-02.2A.2 - Teste 4: Uma nova alteração no arquivo durante o período
+    de cooldown descarta o cooldown da versão anterior e é processada imediatamente.
+    """
+    import json
+    import time
+    from typing import Any
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974)
+    assert real_config_manager.save(initial_cfg) is True
+
+    fake_now = 3000.0
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now)
+
+    on_ws_change = AsyncMock()
+    watcher = ConfigWatcher(
+        hotkeys=MagicMock(),
+        hud=MagicMock(),
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=MagicMock(),
+        max_transient_retries=2,
+        retry_cooldown_seconds=30.0,
+    )
+
+    # 1. Modifica para v1
+    settings_path.write_text(json.dumps({"websocket_port": 9100}), encoding="utf-8")
+    _touch_settings_file(watcher)
+    v1_mtime = os.path.getmtime(watcher.settings_path)
+
+    original_open = open
+
+    def failing_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(file) == str(settings_path) and ("r" in args or kwargs.get("mode", "r") == "r"):
+            raise PermissionError("Bloqueado na v1")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+
+    # Esgota tentativas iniciais da v1 e entra em cooldown
+    await watcher._check_config_file()
+    await watcher._check_config_file()
+    assert watcher._transient_retry_count == 2
+    assert watcher._next_retry_time == 3030.0
+    assert watcher._last_failed_mtime == v1_mtime
+
+    # 2. Restaurar permissão e escrever v2 durante o cooldown (fake_now ainda é 3005.0 < 3030.0)
+    fake_now = 3005.0
+    monkeypatch.setattr("builtins.open", original_open)
+
+    settings_path.write_text(json.dumps({"websocket_port": 9200}), encoding="utf-8")
+    _touch_settings_file(watcher)
+    v2_mtime = os.path.getmtime(watcher.settings_path)
+    assert v2_mtime > v1_mtime
+
+    # 3. Executa verificação: a nova versão deve ser processada IMEDIATAMENTE,
+    # ignorando o cooldown pendente da v1
+    await watcher._check_config_file()
+
+    on_ws_change.assert_awaited_once_with(9200)
+    assert watcher.last_websocket_port == 9200
+    assert watcher.last_mtime == v2_mtime
+    assert watcher._transient_retry_count == 0
+    assert watcher._next_retry_time == 0.0
+
+
+async def test_invalid_content_does_not_trigger_continuous_retries(tmp_path: Path) -> None:
+    """EST-02.2A.2 - Teste 5: JSON malformado não gera retries contínuos periódicos;
+    recupera normalmente quando uma versão válida substitui o conteúdo inválido.
+    """
+    import json
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974)
+    assert real_config_manager.save(initial_cfg) is True
+
+    on_ws_change = AsyncMock()
+    watcher = ConfigWatcher(
+        hotkeys=MagicMock(),
+        hud=MagicMock(),
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=MagicMock(),
+    )
+
+    # Escreve JSON malformado
+    settings_path.write_text("{\ninvalid_json", encoding="utf-8")
+    _touch_settings_file(watcher)
+    bad_mtime = os.path.getmtime(watcher.settings_path)
+
+    # 1ª verificação: rejeita e atualiza last_mtime
+    await watcher._check_config_file()
+    assert watcher.last_mtime == bad_mtime
+    on_ws_change.assert_not_awaited()
+
+    # Espiona reload() para confirmar que checagens seguintes não tentam reload
+    reload_count = 0
     orig_reload = real_config_manager.reload
 
-    def reload_spy() -> AppConfig:
-        nonlocal reload_called
-        reload_called = True
+    def counting_reload() -> AppConfig:
+        nonlocal reload_count
+        reload_count += 1
         return orig_reload()
 
-    real_config_manager.reload = reload_spy  # type: ignore[method-assign]
+    real_config_manager.reload = counting_reload  # type: ignore[method-assign]
+
+    # Checagens adicionais: devem ser no-ops
     await watcher._check_config_file()
-    assert reload_called is False
+    await watcher._check_config_file()
+    assert reload_count == 0
 
-    # Restabelece acesso e atualiza arquivo com novo mtime
-    monkeypatch.undo()
-    real_config_manager.reload = orig_reload  # type: ignore[method-assign]
-
-    settings_path.write_text(json.dumps({"websocket_port": 9900}), encoding="utf-8")
+    # Corrige com configuração válida
+    settings_path.write_text(json.dumps({"websocket_port": 9300}), encoding="utf-8")
     _touch_settings_file(watcher)
 
-    # Executa nova verificação: recupera normalmente com o novo mtime
     await watcher._check_config_file()
-    on_ws_change.assert_awaited_once_with(9900)
-    assert watcher.last_websocket_port == 9900
+    assert reload_count == 1
+    on_ws_change.assert_awaited_once_with(9300)
+    assert watcher.last_websocket_port == 9300
+
+
+async def test_no_duplicate_callbacks_after_successful_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EST-02.2A.2 - Teste 6: Após recuperação com sucesso, verificações adicionais
+    subsequentes não geram chamadas duplicadas aos callbacks.
+    """
+    import json
+    import time
+    from typing import Any
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974)
+    assert real_config_manager.save(initial_cfg) is True
+
+    fake_now = 4000.0
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now)
+
+    on_ws_change = AsyncMock()
+    watcher = ConfigWatcher(
+        hotkeys=MagicMock(),
+        hud=MagicMock(),
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=MagicMock(),
+        max_transient_retries=1,
+        retry_cooldown_seconds=10.0,
+    )
+
+    settings_path.write_text(json.dumps({"websocket_port": 9400}), encoding="utf-8")
+    _touch_settings_file(watcher)
+
+    original_open = open
+
+    def failing_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(file) == str(settings_path) and ("r" in args or kwargs.get("mode", "r") == "r"):
+            raise PermissionError("Falha temporária")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+
+    # Falha na primeira tentativa
+    await watcher._check_config_file()
+    assert on_ws_change.await_count == 0
+
+    # Restabelece acesso e avança cooldown
+    monkeypatch.setattr("builtins.open", original_open)
+    fake_now = 4015.0
+
+    # Recupera com sucesso
+    await watcher._check_config_file()
+    assert on_ws_change.await_count == 1
+    on_ws_change.assert_awaited_with(9400)
+
+    # Executa 5 checagens adicionais sem alterar o arquivo
+    for _ in range(5):
+        await watcher._check_config_file()
+
+    # Confirma que nenhuma chamada duplicada ocorreu
+    assert on_ws_change.await_count == 1
