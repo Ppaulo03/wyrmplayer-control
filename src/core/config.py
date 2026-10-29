@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -92,17 +93,76 @@ class ConfigManager:
             logger.error(f"Erro ao carregar configurações de {self.config_path}: {e}")
             return AppConfig()
 
-    def save(self, config: AppConfig | None = None) -> None:
-        """Salva o estado atual das configurações no arquivo JSON."""
-        if config:
-            self.config = config
+    def save(self, config: AppConfig | None = None) -> bool:
+        """Salva o estado das configurações no arquivo JSON de forma atômica.
+
+        Garante persistência atômica através da escrita em arquivo temporário no
+        mesmo sistema de arquivos, seguida de flush, fsync e substituição via
+        os.replace. Em caso de falha de gravação ou serialização, o arquivo
+        original permanece intacto e self.config não é alterado prematuramente.
+
+        Limitações:
+            Se o chamador mutar diretamente atributos da instância compartilhada
+            em self.config (ex.: config_manager.config.volume_step = 10) antes de
+            invocar save(), tais alterações já residem no objeto em memória. Para
+            garantir isolamento estrito entre memória e disco em caso de falha,
+            recomenda-se passar uma nova instância para save(new_config).
+
+        Returns:
+            bool: True se a persistência e atualização foram bem-sucedidas;
+                  False caso tenha ocorrido qualquer erro de serialização,
+                  escrita ou substituição.
+        """
+        target_config = config if config is not None else self.config
 
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(asdict(self.config), f, indent=4, ensure_ascii=False)
-            logger.info(f"Configurações salvas em {self.config_path}")
+            payload = json.dumps(asdict(target_config), indent=4, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"Erro ao salvar configurações: {e}")
+            logger.error("Erro ao serializar configurações para JSON: %s", e)
+            return False
+
+        target_dir = os.path.dirname(os.path.abspath(self.config_path))
+        os.makedirs(target_dir, exist_ok=True)
+
+        prefix = f".{Path(self.config_path).name}.tmp."
+        temp_path: str | None = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target_dir,
+                prefix=prefix,
+                delete=False,
+            ) as f:
+                temp_path = f.name
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Substituição atômica no mesmo filesystem
+            os.replace(temp_path, self.config_path)
+            temp_path = None
+
+            # Atualiza o estado em memória apenas após o sucesso confirmado em disco
+            if config is not None:
+                self.config = config
+
+            logger.info("Configurações salvas em %s", self.config_path)
+            return True
+        except Exception as e:
+            logger.error("Erro ao salvar configurações em %s: %s", self.config_path, e)
+            return False
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError as err:
+                    logger.warning(
+                        "Falha ao remover arquivo temporário de configuração '%s': %s",
+                        temp_path,
+                        err,
+                    )
 
     def get_all(self) -> AppConfig:
         return self.config

@@ -80,7 +80,7 @@ async def main(page: ft.Page) -> None:
     status_dot = theme.diamond(5, theme.POSITIVE)
 
     # --- Lógica de Salvamento ---
-    def save_settings() -> None:
+    def save_settings() -> bool:
         try:
             g_data = getattr(tab_gen, "data", {})
             h_data = getattr(tab_hot, "data", {})
@@ -106,16 +106,26 @@ async def main(page: ft.Page) -> None:
                     "playback": bool(l_data["playback"].data),
                 },
             )
-            config_manager.save(new_cfg)
+            saved = config_manager.save(new_cfg)
+            if not saved:
+                status_text.value = "erro ao salvar configurações"
+                status_text.color = theme.DANGER
+                status_dot.bgcolor = theme.DANGER
+                page.update()
+                return False
+
             autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
             status_text.value = "salvamento automático ativo"
             status_text.color = theme.POSITIVE
             status_dot.bgcolor = theme.POSITIVE
+            page.update()
+            return True
         except Exception as e:
             status_text.value = f"erro ao salvar: {e}"
             status_text.color = theme.DANGER
             status_dot.bgcolor = theme.DANGER
             page.update()
+            return False
 
     def on_ui_change(e: Any) -> None:
         save_settings()
@@ -123,7 +133,11 @@ async def main(page: ft.Page) -> None:
 
     # --- Instanciação das seções ---
     tab_gen = general_tab(cfg, on_ui_change)
-    tab_hot = hotkeys_tab(cfg, save_settings, status_text)
+
+    def on_hotkeys_save() -> None:
+        save_settings()
+
+    tab_hot = hotkeys_tab(cfg, on_hotkeys_save, status_text)
     tab_lay = layout_tab(cfg, on_ui_change)
     tab_int = integrations_tab(cfg, on_ui_change, page)
     tab_adv = advanced_tab(cfg, on_ui_change)
