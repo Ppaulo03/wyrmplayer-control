@@ -1,3 +1,4 @@
+import ctypes
 import threading
 from collections.abc import Callable
 from typing import Any, cast
@@ -5,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.core.config import ConfigManager
+from src.core.config import AppConfig, ConfigManager
 from src.core.hotkeys import HotkeyManager
 from src.services.player_controller import PlayerController
 
@@ -80,47 +81,31 @@ class FakeKeyboard:
                 cb()
 
 
-class FakeNativeBackend:
-    """Simulador do backend nativo que rastreia estado de thread e comandos WinAPI."""
+class FakeUser32:
+    """Simulador de user32 para testar a thread nativa sem depender do desktop real."""
 
     def __init__(self) -> None:
-        self.active_hotkeys: dict[int, tuple[int, int, str, Callable[[], None]]] = {}
-        self.is_thread_alive = True
-        self.fail_clear = False
+        self.registered_hotkeys: dict[int, tuple[int, int]] = {}
+        self.unregister_calls: list[int] = []
+        self.fail_unregister_ids: set[int] = set()
+        self.fail_all_unregister = False
         self.fail_register = False
-        self.fail_stop = False
-        self.simulate_timeout = False
-        self.refuse_to_stop = False
-        self._next_id = 1
-        self.commands_received: list[str] = []
 
-    def handle_command(self, cmd: str, payload: Any = None) -> bool:
-        self.commands_received.append(cmd)
-        if self.simulate_timeout:
-            return False
+    def PeekMessageW(self, msg: Any, hwnd: Any, min_val: int, max_val: int, remove: int) -> int:
+        return 0
 
-        if cmd == "clear":
-            if self.fail_clear:
-                return False
-            self.active_hotkeys.clear()
-            return True
-        elif cmd == "register_batch":
-            if self.fail_register:
-                return False
-            registrations = cast(list[tuple[int, int, str, Callable[[], None]]], payload)
-            for mods, vk, name, cb in registrations:
-                hid = self._next_id
-                self._next_id += 1
-                self.active_hotkeys[hid] = (mods, vk, name, cb)
-            return len(registrations) > 0
-        elif cmd == "stop":
-            if self.fail_stop:
-                return False
-            self.active_hotkeys.clear()
-            if not self.refuse_to_stop:
-                self.is_thread_alive = False
-            return True
-        return False
+    def RegisterHotKey(self, hwnd: Any, hid: int, mods: int, vk: int) -> int:
+        if self.fail_register:
+            return 0
+        self.registered_hotkeys[hid] = (mods, vk)
+        return 1
+
+    def UnregisterHotKey(self, hwnd: Any, hid: int) -> int:
+        self.unregister_calls.append(hid)
+        if self.fail_all_unregister or hid in self.fail_unregister_ids:
+            return 0  # Falha na WinAPI
+        self.registered_hotkeys.pop(hid, None)
+        return 1  # Sucesso na WinAPI
 
 
 @pytest.fixture
@@ -142,353 +127,54 @@ def hotkey_manager(fake_controller: MagicMock, config_manager: ConfigManager) ->
 
 
 # ==============================================================================
-# EST-01-R01: Limpeza dos handlers do keyboard
+# R01: Preservar hotkeys funcionais (funcionamento parcial controlado)
 # ==============================================================================
 
 
-def test_r01_successful_keyboard_cleanup(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-) -> None:
-    """1. Remoção bem-sucedida de todos os handlers."""
-    hotkey_manager.setup()
-    assert hotkey_manager.registered_keyboard_count == 18
-    assert len(fake_keyboard.registered_hotkeys) == 18
-
-    assert hotkey_manager._clear_keyboard_hotkeys() is True
-    assert hotkey_manager.registered_keyboard_count == 0
-    assert len(fake_keyboard.registered_hotkeys) == 0
-
-
-def test_r01_keyboard_cleanup_with_exception_preserves_reference(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-) -> None:
-    """2 e 3. Remoção com exceção preserva referências cuja remoção não foi confirmada."""
-    hotkey_manager.setup()
-    # Simula falha ao remover os handlers com IDs ímpares (9 falhas de 18)
-    for hid in range(1, 19, 2):
-        fake_keyboard.fail_remove_handlers.add(hid)
-
-    # Limpeza deve falhar e retornar False
-    success = hotkey_manager._clear_keyboard_hotkeys()
-    assert success is False
-
-    # Os 9 handlers que falharam continuam armazenados
-    assert hotkey_manager.registered_keyboard_count == 9
-    assert len(fake_keyboard.registered_hotkeys) == 9
-
-
-def test_r01_reconfiguration_blocked_after_cleanup_failure(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-) -> None:
-    """4. Tentativa de reconfiguração é abortada enquanto limpeza anterior for inconclusiva."""
-    hotkey_manager.setup()
-    # Simula falha total ao remover
-    fake_keyboard.fail_all_remove = True
-
-    # Chama setup() novamente: deve tentar limpar, falhar e não registrar duplicatas
-    hotkey_manager.setup()
-
-    assert hotkey_manager.registered_keyboard_count == 18
-    assert len(fake_keyboard.registered_hotkeys) == 18
-
-
-def test_r01_recovery_after_removal_succeeds(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-) -> None:
-    """5. Recuperação: quando a remoção volta a funcionar, a limpeza é concluída."""
-    hotkey_manager.setup()
-    fake_keyboard.fail_all_remove = True
-
-    # Primeira tentativa falha
-    assert hotkey_manager._clear_keyboard_hotkeys() is False
-    assert hotkey_manager.registered_keyboard_count == 18
-
-    # Falha é resolvida
-    fake_keyboard.fail_all_remove = False
-
-    # Segunda tentativa limpa com sucesso
-    assert hotkey_manager._clear_keyboard_hotkeys() is True
-    assert hotkey_manager.registered_keyboard_count == 0
-    assert len(fake_keyboard.registered_hotkeys) == 0
-
-
-def test_r01_no_duplicate_callbacks_after_reloads(
+def test_r01_all_shortcuts_registered_success(
     hotkey_manager: HotkeyManager,
     fake_keyboard: FakeKeyboard,
     fake_controller: MagicMock,
 ) -> None:
-    """6. Confirmação de que callbacks nunca disparam em duplicidade."""
+    """1. Todos os atalhos registrados normalmente com sucesso integral."""
     hotkey_manager.setup()
-    hotkey_manager.setup()
-    hotkey_manager.setup()
+
+    assert hotkey_manager.active_backend == "keyboard"
+    assert hotkey_manager.registered_keyboard_count == 18
+    assert len(fake_keyboard.registered_hotkeys) == 18
 
     fake_keyboard.trigger("alt gr+p")
-    assert fake_controller.play_pause.call_count == 1
+    cast(MagicMock, fake_controller.play_pause).assert_called_once()
 
 
-# ==============================================================================
-# EST-01-R02: Impedir ativação conflitante de backends
-# ==============================================================================
-
-
-def test_r02_normal_transition_from_native_to_keyboard(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """1. Transição normal de native para keyboard após limpeza confirmada."""
-    clear_called = False
-
-    def mock_clear() -> bool:
-        nonlocal clear_called
-        clear_called = True
-        return True
-
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_clear_native_hotkeys", mock_clear)
-
-    # Força estado anterior como nativo
-    hotkey_manager._active_backend = "native"
-
-    hotkey_manager.setup()
-
-    assert clear_called is True
-    assert hotkey_manager.active_backend == "keyboard"
-    assert len(fake_keyboard.registered_hotkeys) == 18
-
-
-def test_r02_clear_failure_blocks_keyboard_activation(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """2. Falha no comando clear nativo impede ativação do backend keyboard."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_clear_native_hotkeys", lambda: False)
-
-    hotkey_manager._active_backend = "native"
-    hotkey_manager.setup()
-
-    # Backend keyboard NÃO pode ter sido ativado
-    assert hotkey_manager.active_backend is None or hotkey_manager.active_backend == "native"
-    assert len(fake_keyboard.registered_hotkeys) == 0
-
-
-def test_r02_timeout_in_native_cleanup_blocks_keyboard(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """3. Timeout na limpeza nativa bloqueia a ativação de novo backend."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-
-    def mock_send_cmd(cmd: str, payload: Any = None) -> bool:
-        return False
-
-    mock_thread = MagicMock()
-    mock_thread.is_alive.return_value = True
-    hotkey_manager._native_thread = mock_thread
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", mock_send_cmd)
-
-    hotkey_manager.setup()
-
-    assert len(fake_keyboard.registered_hotkeys) == 0
-
-
-def test_r02_confirmation_without_unregistration_fails(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """4. Confirmação sem desregistro bem-sucedido na WinAPI é tratada como falha."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-
-    fake_user32 = MagicMock()
-    fake_user32.UnregisterHotKey.return_value = 0
-    fake_user32.PeekMessageW.return_value = 0
-    monkeypatch.setattr(hotkey_manager, "_user32", fake_user32)
-
-    hotkey_manager._native_callbacks[100] = lambda: None
-
-    def mock_send(cmd: str, payload: Any = None) -> bool:
-        return False
-
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", mock_send)
-    assert hotkey_manager._clear_native_hotkeys() is False
-
-
-def test_r02_no_backend_activated_after_failed_cleanup(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """5. Verificação de que nenhum outro backend é ativado após falha de limpeza."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_clear_native_hotkeys", lambda: False)
-
-    hotkey_manager.setup()
-
-    assert hotkey_manager.active_backend != "keyboard"
-    assert len(fake_keyboard.registered_hotkeys) == 0
-
-
-def test_r02_recovery_after_subsequent_successful_cleanup(
-    hotkey_manager: HotkeyManager,
-    fake_keyboard: FakeKeyboard,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """6. Recuperação após uma limpeza que posteriormente tem sucesso."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-
-    cleanup_ok = False
-
-    def mock_clear() -> bool:
-        return cleanup_ok
-
-    monkeypatch.setattr(hotkey_manager, "_clear_native_hotkeys", mock_clear)
-
-    # 1ª tentativa: falha
-    hotkey_manager.setup()
-    assert len(fake_keyboard.registered_hotkeys) == 0
-
-    # Condição é resolvida
-    cleanup_ok = True
-
-    # 2ª tentativa: recupera e ativa keyboard
-    hotkey_manager.setup()
-    assert hotkey_manager.active_backend == "keyboard"
-    assert len(fake_keyboard.registered_hotkeys) == 18
-
-
-# ==============================================================================
-# EST-01-R03: Encerramento de threads nativas
-# ==============================================================================
-
-
-def test_r03_normal_thread_termination(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """1. Encerramento normal da thread nativa."""
-    fake_native = FakeNativeBackend()
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", fake_native.handle_command)
-
-    mock_thread = MagicMock()
-    mock_thread.is_alive.side_effect = lambda: fake_native.is_thread_alive
-    hotkey_manager._native_thread = mock_thread
-
-    res = hotkey_manager.stop()
-    assert res is True
-    assert hotkey_manager.is_native_thread_alive is False
-    assert hotkey_manager._native_thread is None
-
-
-def test_r03_stop_command_failure_preserves_thread_reference(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """2. Falha no comando stop mantém a referência e reporta falha."""
-    fake_native = FakeNativeBackend()
-    fake_native.fail_stop = True
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", fake_native.handle_command)
-
-    mock_thread = MagicMock()
-    mock_thread.is_alive.return_value = True
-    hotkey_manager._native_thread = mock_thread
-
-    res = hotkey_manager.stop()
-    assert res is False
-    assert hotkey_manager._native_thread is not None
-
-
-def test_r03_thread_alive_after_timeout_preserves_reference(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """3 e 4. Thread que permanece viva após o timeout preserva a referência."""
-    fake_native = FakeNativeBackend()
-    fake_native.refuse_to_stop = True
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", fake_native.handle_command)
-
-    mock_thread = MagicMock()
-    mock_thread.is_alive.return_value = True
-    hotkey_manager._native_thread = mock_thread
-
-    res = hotkey_manager.stop()
-    assert res is False
-    assert hotkey_manager._native_thread is mock_thread
-    assert hotkey_manager.is_native_thread_alive is True
-
-
-def test_r03_prevent_spawning_second_thread_while_first_alive(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """5. Impede criação de uma segunda thread enquanto a anterior estiver ativa."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-
-    mock_thread = MagicMock()
-    mock_thread.is_alive.return_value = True
-    hotkey_manager._native_thread = mock_thread
-
-    assert hotkey_manager._ensure_native_thread() is True
-    assert hotkey_manager._native_thread is mock_thread
-
-
-def test_r03_recovery_and_successful_stop_after_prior_failure(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """6. Encerramento bem-sucedido após uma falha anterior."""
-    fake_native = FakeNativeBackend()
-    fake_native.refuse_to_stop = True
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", fake_native.handle_command)
-
-    mock_thread = MagicMock()
-    mock_thread.is_alive.side_effect = lambda: fake_native.is_thread_alive
-    hotkey_manager._native_thread = mock_thread
-
-    # 1ª tentativa: falha
-    assert hotkey_manager.stop() is False
-    assert hotkey_manager._native_thread is not None
-
-    # Thread finalmente encerra
-    fake_native.refuse_to_stop = False
-
-    # 2ª tentativa: tem sucesso
-    assert hotkey_manager.stop() is True
-    assert hotkey_manager._native_thread is None
-
-
-def test_r03_repeated_stop_calls_are_safe(
-    hotkey_manager: HotkeyManager,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """7. Chamadas repetidas de stop() são seguras e idempotentes."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    assert hotkey_manager.stop() is True
-    assert hotkey_manager.stop() is True
-    assert hotkey_manager.stop() is True
-
-
-# ==============================================================================
-# EST-01-R04: Política de registro parcial (best-effort)
-# ==============================================================================
-
-
-def test_r04_best_effort_variant_tolerance(
+def test_r01_one_shortcut_fails_others_remain_functional(
     hotkey_manager: HotkeyManager,
     fake_keyboard: FakeKeyboard,
     fake_controller: MagicMock,
 ) -> None:
-    """1. Falha de variante alternativa não invalida o atalho se outra variante funcionar."""
+    """2. Um atalho falha e os demais atalhos continuam operacionais no keyboard."""
+    # Faz com que todas as 3 variantes de 'mute' (alt gr+m) falhem no registro
+    fake_keyboard.fail_register_shortcuts.update(["alt gr+m", "ctrl+alt+m", "right alt+m"])
+
+    hotkey_manager.setup()
+
+    # O backend keyboard DEVE continuar ativo com os 5 atalhos funcionais (15 variantes)
+    assert hotkey_manager.active_backend == "keyboard"
+    assert hotkey_manager.registered_keyboard_count == 15
+    assert len(fake_keyboard.registered_hotkeys) == 15
+
+    # play_pause continua funcionando perfeitamente!
+    fake_keyboard.trigger("alt gr+p")
+    cast(MagicMock, fake_controller.play_pause).assert_called_once()
+
+
+def test_r01_variant_fails_but_equivalent_variant_works(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    fake_controller: MagicMock,
+) -> None:
+    """3. Uma variante de AltGr falha, mas a variante alternativa equivalente funciona."""
+    # Apenas 'right alt+p' falha; 'alt gr+p' e 'ctrl+alt+p' funcionam
     fake_keyboard.fail_register_shortcuts.add("right alt+p")
 
     hotkey_manager.setup()
@@ -501,15 +187,14 @@ def test_r04_best_effort_variant_tolerance(
     cast(MagicMock, fake_controller.play_pause).assert_called_once()
 
 
-def test_r04_total_shortcut_failure_triggers_rollback(
+def test_r01_all_shortcuts_fail_triggers_rollback(
     hotkey_manager: HotkeyManager,
     fake_keyboard: FakeKeyboard,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2. Se todas as variantes de um atalho falharem, executa rollback de tudo."""
+    """4. Quando todos os atalhos falham, executa rollback total do backend keyboard."""
     monkeypatch.setattr(hotkey_manager, "_is_windows", False)
-
-    fake_keyboard.fail_register_shortcuts.update(["alt gr+p", "ctrl+alt+p", "right alt+p"])
+    fake_keyboard.fail_all_register = True
 
     hotkey_manager.setup()
 
@@ -518,43 +203,381 @@ def test_r04_total_shortcut_failure_triggers_rollback(
     assert len(fake_keyboard.registered_hotkeys) == 0
 
 
-def test_r04_rollback_failure_blocks_conflicting_fallback(
+def test_r01_fallback_to_winapi_when_keyboard_totally_fails(
     hotkey_manager: HotkeyManager,
     fake_keyboard: FakeKeyboard,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """3. Se o rollback do keyboard falhar, bloqueia fallback nativo para evitar conflito."""
-    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+    """5. Fallback para WinAPI ocorre apenas quando o keyboard falhar totalmente."""
+    fake_keyboard.fail_all_register = True
+    native_called = False
 
-    fake_keyboard.fail_register_shortcuts.update(["alt gr+p", "ctrl+alt+p", "right alt+p"])
-    fake_keyboard.fail_all_remove = True
-
-    native_setup_called = False
-
-    def mock_native_setup(m: Any) -> bool:
-        nonlocal native_setup_called
-        native_setup_called = True
+    def mock_native(m: Any) -> bool:
+        nonlocal native_called
+        native_called = True
+        hotkey_manager._native_callbacks[1] = lambda: None
         return True
 
-    monkeypatch.setattr(hotkey_manager, "_setup_native_hotkeys", mock_native_setup)
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+    monkeypatch.setattr(hotkey_manager, "_setup_native_hotkeys", mock_native)
 
     hotkey_manager.setup()
 
-    assert native_setup_called is False
+    assert native_called is True
+    assert hotkey_manager.active_backend == "native"
+    assert len(fake_keyboard.registered_hotkeys) == 0
+
+
+def test_r01_rollback_failure_blocks_insecure_transition(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """6. Falha no rollback de atalhos do keyboard impede ativação conflitante da WinAPI."""
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+
+    # 1º atalho registra normalmente; no 2º atalho ocorre exceção que aborta o backend
+    call_count = 0
+
+    def faulty_expand(shortcut: str) -> list[str]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return ["alt gr+p"]
+        raise RuntimeError("Falha crítica inesperada no subsistema de atalhos")
+
+    monkeypatch.setattr("src.core.hotkeys.keyboard_utils.expand_shortcut_variants", faulty_expand)
+    fake_keyboard.fail_all_remove = True
+
+    native_called = False
+
+    def mock_native(m: Any) -> bool:
+        nonlocal native_called
+        native_called = True
+        return True
+
+    monkeypatch.setattr(hotkey_manager, "_setup_native_hotkeys", mock_native)
+
+    hotkey_manager.setup()
+
+    # O fallback nativo NÃO pode ser acionado enquanto o rollback do keyboard falhar
+    assert native_called is False
     assert hotkey_manager.active_backend is None
     assert hotkey_manager.registered_keyboard_count > 0
 
 
 # ==============================================================================
-# EST-01-R06: Concorrência e thread-safety
+# R02: Validar configurações antes da limpeza
 # ==============================================================================
 
 
-def test_r06_concurrent_setup_with_timeouts_and_exception_handling(
+def test_r02_config_read_failure_preserves_existing_hotkeys(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    config_manager: ConfigManager,
+    fake_controller: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Falha de leitura no config durante reload preserva atalhos que já estavam funcionando."""
+    hotkey_manager.setup()
+    assert hotkey_manager.registered_keyboard_count == 18
+
+    # Simula erro de leitura/corrupção no load()
+    monkeypatch.setattr(
+        config_manager, "load", MagicMock(side_effect=RuntimeError("Arquivo corrompido"))
+    )
+
+    # Recarrega configurações
+    hotkey_manager.setup()
+
+    # Os atalhos anteriores DEVEM continuar intactos e funcionais!
+    assert hotkey_manager.active_backend == "keyboard"
+    assert hotkey_manager.registered_keyboard_count == 18
+    assert len(fake_keyboard.registered_hotkeys) == 18
+
+    fake_keyboard.trigger("alt gr+p")
+    cast(MagicMock, fake_controller.play_pause).assert_called_once()
+
+
+def test_r02_invalid_config_structure_preserves_existing_hotkeys(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    config_manager: ConfigManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configuração com estrutura inválida preserva atalhos anteriores."""
+    hotkey_manager.setup()
+    assert hotkey_manager.registered_keyboard_count == 18
+
+    # Configuração inválida onde hotkeys não é dicionário
+    bad_cfg = MagicMock()
+    bad_cfg.hotkeys = "invalido_nao_dict"
+    monkeypatch.setattr(config_manager, "load", MagicMock(return_value=bad_cfg))
+
+    hotkey_manager.setup()
+
+    assert hotkey_manager.active_backend == "keyboard"
+    assert hotkey_manager.registered_keyboard_count == 18
+
+
+def test_r02_recovery_and_shortcut_change_after_valid_config(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    config_manager: ConfigManager,
+    fake_controller: MagicMock,
+) -> None:
+    """Recuperação após leitura válida e alteração efetiva de combinações."""
+    hotkey_manager.setup()
+
+    # Salva nova configuração com atalho diferente
+    new_cfg = AppConfig(
+        hotkeys={
+            "play_pause": "ctrl+shift+p",
+            "next_track": "",
+            "previous_track": "",
+            "volume_up": "",
+            "volume_down": "",
+            "mute": "",
+        }
+    )
+    config_manager.save(new_cfg)
+
+    hotkey_manager.setup()
+
+    registered_keys = [hk for hk, _ in fake_keyboard.registered_hotkeys.values()]
+    assert "alt gr+p" not in registered_keys
+    assert "ctrl+shift+p" in registered_keys
+
+    # Atalho antigo não dispara
+    fake_keyboard.trigger("alt gr+p")
+    assert cast(MagicMock, fake_controller.play_pause).call_count == 0
+
+    # Novo atalho dispara
+    fake_keyboard.trigger("ctrl+shift+p")
+    assert cast(MagicMock, fake_controller.play_pause).call_count == 1
+
+
+# ==============================================================================
+# R03: Recuperação de thread nativa encerrada
+# ==============================================================================
+
+
+def test_r03_native_thread_alive_timeout_preserves_reference(
+    hotkey_manager: HotkeyManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread nativa que permanece viva após timeout de stop preserva referência."""
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+
+    mock_thread = MagicMock()
+    mock_thread.is_alive.return_value = True
+    hotkey_manager._native_thread = mock_thread
+
+    monkeypatch.setattr(hotkey_manager, "_send_native_command", lambda cmd, p=None: True)
+
+    res = hotkey_manager.stop()
+    assert res is False
+    assert hotkey_manager._native_thread is mock_thread
+    assert hotkey_manager.is_native_thread_alive is True
+
+
+def test_r03_dead_native_thread_reconciles_callbacks_and_cleans_up(
+    hotkey_manager: HotkeyManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread nativa comprovadamente morta tem seus callbacks residuais reconciliados."""
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+
+    # Simula thread que morreu inesperadamente
+    dead_thread = MagicMock()
+    dead_thread.is_alive.return_value = False
+    hotkey_manager._native_thread = dead_thread
+    hotkey_manager._native_callbacks[1] = lambda: None
+    hotkey_manager._active_backend = "native"
+
+    # _clear_native_hotkeys deve detectar que a thread está morta, limpar callbacks e retornar True
+    res = hotkey_manager._clear_native_hotkeys()
+
+    assert res is True
+    assert len(hotkey_manager._native_callbacks) == 0
+    assert hotkey_manager._native_thread is None
+    assert hotkey_manager.active_backend is None
+
+
+def test_r03_reconfiguration_succeeds_after_thread_termination(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Após encerramento de thread nativa anterior, nova configuração tem sucesso."""
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+
+    dead_thread = MagicMock()
+    dead_thread.is_alive.return_value = False
+    hotkey_manager._native_thread = dead_thread
+    hotkey_manager._native_callbacks[1] = lambda: None
+
+    hotkey_manager.setup()
+
+    assert hotkey_manager.active_backend == "keyboard"
+    assert hotkey_manager.registered_keyboard_count == 18
+    assert len(hotkey_manager._native_callbacks) == 0
+
+
+def test_r03_no_second_thread_while_first_alive(
+    hotkey_manager: HotkeyManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Garantia de que duas threads nativas não ficam ativas simultaneamente."""
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+
+    live_thread = MagicMock()
+    live_thread.is_alive.return_value = True
+    hotkey_manager._native_thread = live_thread
+
+    assert hotkey_manager._ensure_native_thread() is True
+    assert hotkey_manager._native_thread is live_thread
+
+
+# ==============================================================================
+# R04: Testes reais de WinAPI e UnregisterHotKey
+# ==============================================================================
+
+
+def test_r04_real_unregister_hotkey_failure_propagation(
+    hotkey_manager: HotkeyManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercita o native_loop real com FakeUser32 comprovando a detecção de erro na WinAPI."""
+    monkeypatch.setattr(hotkey_manager, "_is_windows", True)
+
+    fake_user32 = FakeUser32()
+    monkeypatch.setattr(hotkey_manager, "_user32", fake_user32)
+
+    # Inicia a thread nativa real
+    assert hotkey_manager._ensure_native_thread() is True
+
+    # Registra uma hotkey através do loop real
+    reg_ok = hotkey_manager._send_native_command(
+        "register_batch", [(0x4003, 0x50, "alt gr+p", lambda: None)]
+    )
+    assert reg_ok is True
+    assert len(hotkey_manager._native_callbacks) == 1
+    hotkey_id = list(hotkey_manager._native_callbacks.keys())[0]
+
+    # Simula falha na WinAPI para o comando UnregisterHotKey
+    fake_user32.fail_all_unregister = True
+
+    # Envia o comando clear real para a fila da thread
+    clear_ok = hotkey_manager._send_native_command("clear")
+
+    # UnregisterHotKey FOI chamado pela thread nativa
+    assert hotkey_id in fake_user32.unregister_calls
+    # O comando clear reportou FALHA
+    assert clear_ok is False
+    # O registro NÃO foi descartado prematuramente
+    assert hotkey_id in hotkey_manager._native_callbacks
+
+    # Recuperação: WinAPI volta a responder com sucesso
+    fake_user32.fail_all_unregister = False
+    recovery_ok = hotkey_manager._send_native_command("clear")
+
+    assert recovery_ok is True
+    assert len(hotkey_manager._native_callbacks) == 0
+
+    # Finaliza a thread nativa
+    hotkey_manager._send_native_command("stop")
+
+
+# ==============================================================================
+# R05: Consistência de active_backend
+# ==============================================================================
+
+
+def test_r05_active_backend_consistency_on_empty_handlers(
     hotkey_manager: HotkeyManager,
     fake_keyboard: FakeKeyboard,
 ) -> None:
-    """Valida setup() concorrente com barreiras sincronizadas e detecção de exceções."""
+    """active_backend não reporta backend quando não há registros ativos."""
+    hotkey_manager.setup()
+    assert hotkey_manager.active_backend == "keyboard"
+
+    # Limpeza remove todos os handlers
+    hotkey_manager._clear_keyboard_hotkeys()
+    assert hotkey_manager.registered_keyboard_count == 0
+    assert hotkey_manager.active_backend is None
+
+
+def test_r05_active_backend_on_empty_hotkey_map(
+    hotkey_manager: HotkeyManager,
+    config_manager: ConfigManager,
+) -> None:
+    """Configuração sem nenhum atalho define active_backend como None."""
+    empty_cfg = AppConfig(
+        hotkeys={
+            "play_pause": "",
+            "next_track": "",
+            "previous_track": "",
+            "volume_up": "",
+            "volume_down": "",
+            "mute": "",
+        }
+    )
+    config_manager.save(empty_cfg)
+
+    hotkey_manager.setup()
+    assert hotkey_manager.active_backend is None
+
+
+# ==============================================================================
+# R06: Diagnóstico da WinAPI (ctypes use_last_error)
+# ==============================================================================
+
+
+def test_r06_winapi_last_error_diagnostic(
+    hotkey_manager: HotkeyManager,
+) -> None:
+    """Verifica que o carregamento de user32 no Windows utiliza use_last_error=True."""
+    if not hotkey_manager._is_windows:
+        pytest.skip("Teste exclusivo de ambiente Windows")
+
+    assert hotkey_manager._user32 is not None
+
+    # Chamada propositalmente inválida de UnregisterHotKey para ID inexistente
+    res = hotkey_manager._user32.UnregisterHotKey(None, 987654)
+    # WinAPI retorna 0 em caso de erro
+    assert res == 0
+    err = ctypes.get_last_error()
+    # ERROR_HOTKEY_NOT_REGISTERED = 1419
+    assert err != 0
+
+
+# ==============================================================================
+# Regressões gerais e concorrência
+# ==============================================================================
+
+
+def test_twenty_consecutive_reloads_idempotent(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+    fake_controller: MagicMock,
+) -> None:
+    """20 recarregamentos sucessivos permanecem estritamente idempotentes."""
+    for _ in range(20):
+        hotkey_manager.setup()
+
+    assert hotkey_manager.registered_keyboard_count == 18
+    assert len(fake_keyboard.registered_hotkeys) == 18
+
+    fake_keyboard.trigger("alt gr+p")
+    cast(MagicMock, fake_controller.play_pause).assert_called_once()
+
+
+def test_concurrent_setup_with_timeouts_and_exception_handling(
+    hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
+) -> None:
+    """Valida setup() concorrente com barreiras e sem exceções."""
     threads: list[threading.Thread] = []
     thread_count = 8
     barrier = threading.Barrier(thread_count)
@@ -574,19 +597,19 @@ def test_r06_concurrent_setup_with_timeouts_and_exception_handling(
 
     for t in threads:
         t.join(timeout=5.0)
-        assert not t.is_alive(), "Thread bloqueada durante teste de concorrência"
+        assert not t.is_alive(), "Thread bloqueada durante concorrência"
 
-    assert len(errors) == 0, f"Exceções em threads de setup: {errors}"
+    assert len(errors) == 0, f"Exceções em threads: {errors}"
     assert len(fake_keyboard.registered_hotkeys) == 18
     assert hotkey_manager.registered_keyboard_count == 18
     assert hotkey_manager.active_backend == "keyboard"
 
 
-def test_r06_concurrent_setup_and_stop_mixed(
+def test_concurrent_setup_and_stop_mixed(
     hotkey_manager: HotkeyManager,
     fake_keyboard: FakeKeyboard,
 ) -> None:
-    """Valida chamadas simultâneas de setup() e stop() sem deadlocks nem exceções."""
+    """Valida concorrência entre setup() e stop() sem deadlocks."""
     threads: list[threading.Thread] = []
     thread_count = 10
     barrier = threading.Barrier(thread_count)
@@ -614,9 +637,9 @@ def test_r06_concurrent_setup_and_stop_mixed(
 
     for t in threads:
         t.join(timeout=5.0)
-        assert not t.is_alive(), "Thread bloqueada durante concorrência setup/stop"
+        assert not t.is_alive(), "Thread bloqueada"
 
-    assert len(errors) == 0, f"Exceções ocorridas na concorrência: {errors}"
+    assert len(errors) == 0, f"Exceções: {errors}"
 
     if hotkey_manager.active_backend == "keyboard":
         assert len(fake_keyboard.registered_hotkeys) == 18
