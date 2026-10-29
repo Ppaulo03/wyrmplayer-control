@@ -221,7 +221,9 @@ def _validate_and_build_config(data: dict[str, Any]) -> AppConfig:
         start_with_windows_elevated = val
 
     # 11. hotkeys
-    hotkeys = DEFAULT_HOTKEYS.copy()
+    # R01: Se 'hotkeys' não estiver no JSON, utiliza DEFAULT_HOTKEYS. Se estiver presente
+    # (mesmo parcial ou vazio), preserva estritamente a seleção do usuário sem introduzir
+    # ações não configuradas. Entradas desconhecidas são ignoradas (R02).
     if "hotkeys" in data:
         raw_hotkeys = data["hotkeys"]
         if not isinstance(raw_hotkeys, dict):
@@ -229,19 +231,25 @@ def _validate_and_build_config(data: dict[str, Any]) -> AppConfig:
                 "Campo 'hotkeys' deve ser um objeto JSON (dict), "
                 f"obtido {type(raw_hotkeys).__name__}."
             )
+        hotkeys: dict[str, str] = {}
         for k, v in raw_hotkeys.items():
             if not isinstance(k, str):
                 raise ConfigValidationError(
                     f"Chave de atalho deve ser uma string, obtido {type(k).__name__}."
                 )
-            if not isinstance(v, str):
-                raise ConfigValidationError(
-                    f"Atalho para a ação '{k}' deve ser uma string, obtido {type(v).__name__}."
-                )
             if k in DEFAULT_HOTKEYS:
+                if not isinstance(v, str):
+                    raise ConfigValidationError(
+                        f"Atalho para a ação '{k}' deve ser uma string, obtido {type(v).__name__}."
+                    )
                 hotkeys[k] = v
+            # Chaves desconhecidas em hotkeys são ignoradas na representação em memória
+    else:
+        hotkeys = DEFAULT_HOTKEYS.copy()
 
     # 12. triggers
+    # Triggers preenche ausentes com defaults (necessário para UI do HUD), mas preserva
+    # valores configurados e ignora chaves desconhecidas (R02).
     triggers = DEFAULT_TRIGGERS.copy()
     if "triggers" in data:
         raw_triggers = data["triggers"]
@@ -255,12 +263,14 @@ def _validate_and_build_config(data: dict[str, Any]) -> AppConfig:
                 raise ConfigValidationError(
                     f"Chave de gatilho deve ser uma string, obtido {type(k).__name__}."
                 )
-            if not isinstance(v, bool):
-                raise ConfigValidationError(
-                    f"Gatilho '{k}' deve ser um booleano (true/false), obtido {type(v).__name__}."
-                )
             if k in DEFAULT_TRIGGERS:
+                if not isinstance(v, bool):
+                    raise ConfigValidationError(
+                        f"Gatilho '{k}' deve ser um booleano (true/false), "
+                        f"obtido {type(v).__name__}."
+                    )
                 triggers[k] = v
+            # Chaves desconhecidas em triggers são ignoradas na representação em memória
 
     return AppConfig(
         volume_step=volume_step,

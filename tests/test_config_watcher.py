@@ -994,3 +994,56 @@ async def test_config_watcher_blocks_invalid_field_types_and_recovers_when_fixed
     assert watcher.last_websocket_port == 9300
     assert watcher.last_hud_layout == (0, "top_left")
     assert watcher.last_spotify_integration is True
+
+
+async def test_config_watcher_applies_valid_config_with_unknown_internal_entries(
+    tmp_path: Path,
+) -> None:
+    """R02: ConfigWatcher aplica configs válidas mesmo com entradas internas desconhecidas."""
+    import json
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974, volume_step=5)
+    assert real_config_manager.save(initial_cfg) is True
+
+    mock_hotkeys = MagicMock()
+    mock_hotkeys.is_input_desktop_accessible.return_value = True
+    mock_hud = MagicMock()
+    mock_hud.show_hud = AsyncMock()
+    on_ws_change = AsyncMock()
+    on_spotify_change = MagicMock()
+
+    watcher = ConfigWatcher(
+        hotkeys=mock_hotkeys,
+        hud=mock_hud,
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=on_spotify_change,
+    )
+
+    # Modifica o arquivo com campos conhecidos válidos e entradas internas desconhecidas
+    mixed_data = {
+        "websocket_port": 9500,
+        "volume_step": 8,
+        "hotkeys": {
+            "play_pause": "ctrl+p",
+            "unknown_future_action": 123,
+        },
+        "triggers": {
+            "volume": False,
+            "future_unknown_event": "enabled",
+        },
+    }
+    settings_path.write_text(json.dumps(mixed_data), encoding="utf-8")
+    _touch_settings_file(watcher)
+
+    await watcher._check_config_file()
+
+    assert real_config_manager.last_load_succeeded is True
+    assert real_config_manager.last_error_category is None
+    on_ws_change.assert_awaited_once_with(9500)
+    assert watcher.last_websocket_port == 9500
+    assert watcher.last_hotkeys == {"play_pause": "ctrl+p"}

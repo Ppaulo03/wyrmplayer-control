@@ -995,8 +995,8 @@ def test_validation_hotkeys_structures_and_values(
         assert cfg_path.read_text(encoding="utf-8") == raw_content
 
 
-def test_validation_hotkeys_partial_fill_with_defaults(tmp_path: Path) -> None:
-    """CFG-B04: Configurações parciais de hotkeys preservam escolhas e complementam com defaults."""
+def test_validation_hotkeys_partial_preserves_only_configured_actions(tmp_path: Path) -> None:
+    """R01: Configurações parciais de hotkeys preservam apenas ações configuradas sem defaults."""
     cfg_path = tmp_path / "settings.json"
     cfg_path.write_text(
         json.dumps({"hotkeys": {"play_pause": "ctrl+p", "mute": ""}}),
@@ -1007,11 +1007,12 @@ def test_validation_hotkeys_partial_fill_with_defaults(tmp_path: Path) -> None:
     assert mgr.last_load_succeeded is True
     assert mgr.config.hotkeys["play_pause"] == "ctrl+p"
     assert mgr.config.hotkeys["mute"] == ""  # desativado
-    # Ações ausentes recebem os padrões esperados
-    assert mgr.config.hotkeys["next_track"] == "alt gr+right"
-    assert mgr.config.hotkeys["previous_track"] == "alt gr+left"
-    assert mgr.config.hotkeys["volume_up"] == "alt gr+up"
-    assert mgr.config.hotkeys["volume_down"] == "alt gr+down"
+    # Ações ausentes NÃO devem ser introduzidas automaticamente
+    assert "next_track" not in mgr.config.hotkeys
+    assert "previous_track" not in mgr.config.hotkeys
+    assert "volume_up" not in mgr.config.hotkeys
+    assert "volume_down" not in mgr.config.hotkeys
+    assert mgr.config.hotkeys == {"play_pause": "ctrl+p", "mute": ""}
 
 
 @pytest.mark.parametrize(
@@ -1126,3 +1127,248 @@ def test_validation_preserves_last_valid_state_and_recovers_when_fixed(tmp_path:
     assert mgr.last_error_category is None
     assert recovered.volume_step == 20
     assert mgr.config.volume_step == 20
+
+
+def test_validation_hotkeys_empty_dict_preserved(tmp_path: Path) -> None:
+    """R01: Dicionário explicitamente vazio em hotkeys é preservado sem defaults."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"hotkeys": {}}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys == {}
+
+
+def test_validation_hotkeys_single_action_preserved(tmp_path: Path) -> None:
+    """R01: Dicionário contendo uma única ação preserva somente ela."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"hotkeys": {"play_pause": "ctrl+p"}}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys == {"play_pause": "ctrl+p"}
+
+
+def test_validation_hotkeys_multiple_actions_preserved(tmp_path: Path) -> None:
+    """R01: Dicionário contendo algumas ações preserva somente as fornecidas."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(
+        json.dumps({"hotkeys": {"volume_up": "alt+up", "volume_down": "alt+down"}}),
+        encoding="utf-8",
+    )
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys == {"volume_up": "alt+up", "volume_down": "alt+down"}
+
+
+def test_validation_hotkeys_explicitly_disabled_by_empty_string(tmp_path: Path) -> None:
+    """R01: Ação explicitamente desativada por string vazia permanece desativada."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"hotkeys": {"play_pause": ""}}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys == {"play_pause": ""}
+
+
+def test_validation_hotkeys_collision_with_default_does_not_inject_default(tmp_path: Path) -> None:
+    """R01: Atalho personalizado igual ao padrão de outra ação não injeta a ação padrão."""
+    cfg_path = tmp_path / "settings.json"
+    # play_pause configurado com 'alt gr+m', que é o padrão de 'mute'
+    cfg_path.write_text(json.dumps({"hotkeys": {"play_pause": "alt gr+m"}}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys == {"play_pause": "alt gr+m"}
+    assert "mute" not in mgr.config.hotkeys
+
+
+def test_validation_hotkeys_full_configuration_preserved(tmp_path: Path) -> None:
+    """R01: Configuração completa com todos os atalhos fornecidos é preservada."""
+    cfg_path = tmp_path / "settings.json"
+    full_hotkeys = {
+        "play_pause": "ctrl+1",
+        "next_track": "ctrl+2",
+        "previous_track": "ctrl+3",
+        "volume_up": "ctrl+4",
+        "volume_down": "ctrl+5",
+        "mute": "ctrl+6",
+    }
+    cfg_path.write_text(json.dumps({"hotkeys": full_hotkeys}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys == full_hotkeys
+
+
+def test_validation_hotkeys_and_triggers_instances_independence(tmp_path: Path) -> None:
+    """R01: Instâncias de AppConfig e ConfigManager possuem dicionários independentes."""
+    cfg1 = AppConfig()
+    cfg2 = AppConfig()
+    assert cfg1.hotkeys is not cfg2.hotkeys
+    assert cfg1.triggers is not cfg2.triggers
+
+    cfg1.hotkeys["play_pause"] = "modified"
+    assert cfg2.hotkeys["play_pause"] != "modified"
+
+    cfg1.triggers["volume"] = False
+    assert cfg2.triggers["volume"] is True
+
+
+def test_hotkey_manager_integration_collision_does_not_override_custom_hotkey(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R01: HotkeyManager.setup com atalho 'alt gr+m' em play_pause não registra mute."""
+    from src.core.hotkeys import HotkeyManager
+
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"hotkeys": {"play_pause": "alt gr+m"}}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    mock_controller = MagicMock()
+
+    hk_mgr = HotkeyManager(controller=mock_controller, config=mgr)
+
+    # Captura o mapa passado para _setup_low_level_keyboard_hotkeys
+    captured_maps: list[dict[str, Any]] = []
+
+    def fake_setup_kb(hotkey_map: dict[str, Any]) -> bool:
+        captured_maps.append(hotkey_map)
+        return True
+
+    monkeypatch.setattr(hk_mgr, "_setup_low_level_keyboard_hotkeys", fake_setup_kb)
+    monkeypatch.setattr(hk_mgr, "_clear_keyboard_hotkeys", lambda: True)
+    monkeypatch.setattr(hk_mgr, "_clear_native_hotkeys", lambda: True)
+
+    hk_mgr.setup()
+
+    assert len(captured_maps) == 1
+    hotkey_map = captured_maps[0]
+    assert list(hotkey_map.keys()) == ["alt gr+m"]
+
+    # Invoca o callback do atalho 'alt gr+m' e valida que é play_pause, não toggle_mute
+    hotkey_map["alt gr+m"]()
+    mock_controller.play_pause.assert_called_once()
+    mock_controller.toggle_mute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"hotkeys": {"future_action": "ctrl+k"}},
+        {"hotkeys": {"future_action": 123}},
+        {"hotkeys": {"future_action": {"sequence": ["ctrl", "alt", "k"]}}},
+        {"hotkeys": {"future_action": None}},
+        {"hotkeys": {"future_action": [1, 2, 3]}},
+    ],
+)
+def test_validation_ignores_unknown_internal_hotkeys_entries(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    """R02: Ações desconhecidas em hotkeys são ignoradas sem rejeitar a configuração."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps(payload)
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.last_error_category is None
+    # Ação desconhecida foi ignorada na representação em memória
+    assert "future_action" not in mgr.config.hotkeys
+    assert mgr.config.hotkeys == {}
+    # Arquivo no disco permaneceu intacto
+    assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"triggers": {"future_event": True}},
+        {"triggers": {"future_event": "enabled"}},
+        {"triggers": {"future_event": 123}},
+        {"triggers": {"future_event": None}},
+        {"triggers": {"future_event": {"nested": "value"}}},
+    ],
+)
+def test_validation_ignores_unknown_internal_triggers_entries(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    """R02: Eventos desconhecidos em triggers são ignorados sem rejeitar a configuração."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps(payload)
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.last_error_category is None
+    assert "future_event" not in mgr.config.triggers
+    # Triggers conhecidos mantêm seus defaults
+    assert mgr.config.triggers["volume"] is True
+    assert mgr.config.triggers["metadata"] is True
+    assert mgr.config.triggers["playback"] is True
+    assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+def test_validation_document_with_valid_known_and_unknown_internal_entries(
+    tmp_path: Path,
+) -> None:
+    """R02: Documento com campos conhecidos válidos e entradas internas desconhecidas é aceito."""
+    cfg_path = tmp_path / "settings.json"
+    complex_data = {
+        "websocket_port": 9000,
+        "volume_step": 10,
+        "hotkeys": {
+            "play_pause": "ctrl+p",
+            "unknown_hotkey": 123,
+            "another_unknown": {"seq": ["ctrl", "k"]},
+        },
+        "triggers": {
+            "volume": False,
+            "future_trigger": "enabled",
+            "another_trigger": 999,
+        },
+        "future_root_option": "custom",
+    }
+    raw_content = json.dumps(complex_data)
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.last_error_category is None
+    assert mgr.config.websocket_port == 9000
+    assert mgr.config.volume_step == 10
+    assert mgr.config.hotkeys == {"play_pause": "ctrl+p"}
+    assert mgr.config.triggers == {
+        "volume": False,
+        "metadata": True,
+        "playback": True,
+    }
+    assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"hotkeys": {"play_pause": 123}},
+        {"hotkeys": {"volume_up": None}},
+        {"hotkeys": {"next_track": True}},
+        {"hotkeys": {"mute": ["alt", "m"]}},
+        {"triggers": {"volume": "enabled"}},
+        {"triggers": {"metadata": 1}},
+        {"triggers": {"playback": None}},
+        {"triggers": {"volume": [True]}},
+    ],
+)
+def test_validation_known_internal_entries_still_rejected_when_invalid(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    """R02: Entradas conhecidas continuam sendo estritamente validadas e rejeitadas se inválidas."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps(payload)
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is False
+    assert mgr.last_error_category == "invalid_content"
+    assert cfg_path.read_text(encoding="utf-8") == raw_content
