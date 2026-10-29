@@ -907,3 +907,90 @@ async def test_no_duplicate_callbacks_after_successful_recovery(
 
     # Confirma que nenhuma chamada duplicada ocorreu
     assert on_ws_change.await_count == 1
+
+
+# ==============================================================================
+# EST-02.2B.1: Validação de Configurações no ConfigWatcher
+# ==============================================================================
+
+
+async def test_config_watcher_blocks_invalid_field_types_and_recovers_when_fixed(
+    tmp_path: Path,
+) -> None:
+    """CFG-B07: ConfigWatcher bloqueia aplicação de campos conhecidos inválidos
+    e aplica com sucesso após correção do arquivo.
+    """
+    import json
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(
+        websocket_port=8974,
+        hud_monitor=0,
+        hud_position="bottom_right",
+        spotify_integration=False,
+    )
+    assert real_config_manager.save(initial_cfg) is True
+
+    mock_hotkeys = MagicMock()
+    mock_hotkeys.is_input_desktop_accessible.return_value = True
+    mock_hud = MagicMock()
+    mock_hud.show_hud = AsyncMock()
+    on_ws_change = AsyncMock()
+    on_spotify_change = MagicMock()
+
+    watcher = ConfigWatcher(
+        hotkeys=mock_hotkeys,
+        hud=mock_hud,
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=on_spotify_change,
+    )
+
+    # 1. Modifica o arquivo com campos com tipos e valores inválidos
+    invalid_data = {
+        "volume_step": "cem",
+        "websocket_port": 999999,
+        "hud_position": "invalid_preset",
+        "spotify_integration": "sim",
+        "hotkeys": {"play_pause": 123},
+    }
+    settings_path.write_text(json.dumps(invalid_data), encoding="utf-8")
+    _touch_settings_file(watcher)
+
+    await watcher._check_config_file()
+
+    # Confirma que NENHUM componente recebeu dados inválidos
+    mock_hotkeys.setup.assert_not_called()
+    mock_hud.apply_layout.assert_not_called()
+    on_ws_change.assert_not_awaited()
+    on_spotify_change.assert_not_called()
+    assert watcher.last_websocket_port == 8974
+    assert watcher.last_hud_layout == (0, "bottom_right")
+    assert watcher.last_spotify_integration is False
+    assert real_config_manager.last_load_succeeded is False
+    assert real_config_manager.last_error_category == "invalid_content"
+
+    # 2. Corrige o arquivo com dados válidos
+    valid_data = {
+        "websocket_port": 9300,
+        "hud_monitor": 0,
+        "hud_position": "top_left",
+        "spotify_integration": True,
+    }
+    settings_path.write_text(json.dumps(valid_data), encoding="utf-8")
+    _touch_settings_file(watcher)
+
+    await watcher._check_config_file()
+
+    # Confirma que os novos parâmetros foram devidamente aplicados
+    assert real_config_manager.last_load_succeeded is True
+    assert real_config_manager.last_error_category is None
+    on_ws_change.assert_awaited_once_with(9300)
+    on_spotify_change.assert_called_once()
+    mock_hud.apply_layout.assert_called()
+    assert watcher.last_websocket_port == 9300
+    assert watcher.last_hud_layout == (0, "top_left")
+    assert watcher.last_spotify_integration is True

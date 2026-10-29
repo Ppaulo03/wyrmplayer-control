@@ -821,3 +821,308 @@ def test_reload_missing_file_recovery_after_restoring_write_conditions(
     assert cfg_path.exists()
     assert recovered_cfg.volume_step == 5  # Recreação padrão persistida
     assert mgr.config.volume_step == 5
+
+
+# ==============================================================================
+# EST-02.2B.1: Validação de Configurações e Compatibilidade Retroativa
+# ==============================================================================
+
+
+@pytest.mark.parametrize(
+    ("payload", "field_name"),
+    [
+        ({"volume_step": "abc"}, "volume_step"),
+        ({"volume_step": None}, "volume_step"),
+        ({"volume_step": [5]}, "volume_step"),
+        ({"volume_step": 5.5}, "volume_step"),
+        ({"hud_display_time": "3"}, "hud_display_time"),
+        ({"hud_display_time": None}, "hud_display_time"),
+        ({"hud_display_time": 3.0}, "hud_display_time"),
+        ({"websocket_port": "8974"}, "websocket_port"),
+        ({"websocket_port": None}, "websocket_port"),
+        ({"websocket_port": [8974]}, "websocket_port"),
+        ({"hud_monitor": "0"}, "hud_monitor"),
+        ({"hud_monitor": None}, "hud_monitor"),
+        ({"hud_monitor": []}, "hud_monitor"),
+        ({"hud_position": 123}, "hud_position"),
+        ({"hud_position": None}, "hud_position"),
+        ({"hud_position": []}, "hud_position"),
+        ({"log_level": 123}, "log_level"),
+        ({"log_level": None}, "log_level"),
+        ({"log_file": 123}, "log_file"),
+        ({"log_file": None}, "log_file"),
+        ({"spotify_integration": "false"}, "spotify_integration"),
+        ({"spotify_integration": 0}, "spotify_integration"),
+        ({"spotify_integration": None}, "spotify_integration"),
+        ({"start_with_windows": "true"}, "start_with_windows"),
+        ({"start_with_windows": 1}, "start_with_windows"),
+        ({"start_with_windows": None}, "start_with_windows"),
+        ({"start_with_windows_elevated": "true"}, "start_with_windows_elevated"),
+        ({"start_with_windows_elevated": 1}, "start_with_windows_elevated"),
+        ({"start_with_windows_elevated": None}, "start_with_windows_elevated"),
+        ({"hotkeys": []}, "hotkeys"),
+        ({"hotkeys": "string"}, "hotkeys"),
+        ({"hotkeys": None}, "hotkeys"),
+        ({"triggers": []}, "triggers"),
+        ({"triggers": "string"}, "triggers"),
+        ({"triggers": None}, "triggers"),
+    ],
+)
+def test_validation_rejects_incompatible_field_types(
+    tmp_path: Path, payload: dict[str, Any], field_name: str
+) -> None:
+    """CFG-B02: Rejeita tipos incompatíveis nos campos conhecidos de AppConfig."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps(payload)
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is False
+    assert mgr.last_error_category == "invalid_content"
+    # Não sobrescreve o arquivo com erro
+    assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+@pytest.mark.parametrize(
+    ("payload", "is_valid"),
+    [
+        # volume_step: 1 a 100
+        ({"volume_step": 0}, False),
+        ({"volume_step": -5}, False),
+        ({"volume_step": 1}, True),
+        ({"volume_step": 5}, True),
+        ({"volume_step": 100}, True),
+        ({"volume_step": 101}, False),
+        # hud_display_time: 1 a 60
+        ({"hud_display_time": 0}, False),
+        ({"hud_display_time": -1}, False),
+        ({"hud_display_time": 1}, True),
+        ({"hud_display_time": 30}, True),
+        ({"hud_display_time": 60}, True),
+        ({"hud_display_time": 61}, False),
+        # websocket_port: 1 a 65535
+        ({"websocket_port": 0}, False),
+        ({"websocket_port": -80}, False),
+        ({"websocket_port": 1}, True),
+        ({"websocket_port": 8974}, True),
+        ({"websocket_port": 65535}, True),
+        ({"websocket_port": 65536}, False),
+        # hud_monitor: >= 0
+        ({"hud_monitor": -1}, False),
+        ({"hud_monitor": 0}, True),
+        ({"hud_monitor": 3}, True),
+        # hud_position: presets conhecidos
+        ({"hud_position": "bottom_right"}, True),
+        ({"hud_position": "top_left"}, True),
+        ({"hud_position": "center"}, True),
+        ({"hud_position": "floating"}, False),
+        ({"hud_position": ""}, False),
+        # log_level: níveis padrão Python (case-insensitive)
+        ({"log_level": "DEBUG"}, True),
+        ({"log_level": "info"}, True),
+        ({"log_level": "WARNING"}, True),
+        ({"log_level": "ERROR"}, True),
+        ({"log_level": "CRITICAL"}, True),
+        ({"log_level": "VERBOSE"}, False),
+        ({"log_level": ""}, False),
+        # log_file: string não vazia
+        ({"log_file": "wyrmplayer.log"}, True),
+        ({"log_file": "logs/test.log"}, True),
+        ({"log_file": ""}, False),
+        ({"log_file": "   "}, False),
+    ],
+)
+def test_validation_values_and_boundaries(
+    tmp_path: Path, payload: dict[str, Any], is_valid: bool
+) -> None:
+    """CFG-B03: Valida intervalos numéricos e valores válidos para strings/presets."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps(payload)
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is is_valid
+    if is_valid:
+        assert mgr.last_error_category is None
+    else:
+        assert mgr.last_error_category == "invalid_content"
+        assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["volume_step", "hud_display_time", "websocket_port", "hud_monitor"],
+)
+@pytest.mark.parametrize("bool_val", [True, False])
+def test_validation_booleans_not_accepted_as_integers(
+    tmp_path: Path, field_name: str, bool_val: bool
+) -> None:
+    """CFG-B02: Garante que booleanos não sejam aceitos em campos inteiros."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps({field_name: bool_val})
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is False
+    assert mgr.last_error_category == "invalid_content"
+    assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+@pytest.mark.parametrize(
+    ("hotkey_payload", "is_valid"),
+    [
+        ({"play_pause": 123}, False),
+        ({"volume_up": None}, False),
+        ({"volume_down": True}, False),
+        ({"mute": ["alt", "m"]}, False),
+        ({"play_pause": "alt gr+p"}, True),
+        ({"play_pause": ""}, True),  # String vazia permitida para desativar
+        ({"volume_up": "ctrl+alt+up"}, True),
+    ],
+)
+def test_validation_hotkeys_structures_and_values(
+    tmp_path: Path, hotkey_payload: dict[str, Any], is_valid: bool
+) -> None:
+    """CFG-B04: Valida tipos dos valores do dicionário de hotkeys."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps({"hotkeys": hotkey_payload})
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is is_valid
+    if not is_valid:
+        assert mgr.last_error_category == "invalid_content"
+        assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+def test_validation_hotkeys_partial_fill_with_defaults(tmp_path: Path) -> None:
+    """CFG-B04: Configurações parciais de hotkeys preservam escolhas e complementam com defaults."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(
+        json.dumps({"hotkeys": {"play_pause": "ctrl+p", "mute": ""}}),
+        encoding="utf-8",
+    )
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.hotkeys["play_pause"] == "ctrl+p"
+    assert mgr.config.hotkeys["mute"] == ""  # desativado
+    # Ações ausentes recebem os padrões esperados
+    assert mgr.config.hotkeys["next_track"] == "alt gr+right"
+    assert mgr.config.hotkeys["previous_track"] == "alt gr+left"
+    assert mgr.config.hotkeys["volume_up"] == "alt gr+up"
+    assert mgr.config.hotkeys["volume_down"] == "alt gr+down"
+
+
+@pytest.mark.parametrize(
+    ("trigger_payload", "is_valid"),
+    [
+        ({"volume": "sim"}, False),
+        ({"metadata": 1}, False),
+        ({"playback": None}, False),
+        ({"volume": False}, True),
+        ({"volume": True, "metadata": False, "playback": True}, True),
+    ],
+)
+def test_validation_triggers_structures_and_values(
+    tmp_path: Path, trigger_payload: dict[str, Any], is_valid: bool
+) -> None:
+    """CFG-B05: Valida integridade e tipos dos valores de triggers."""
+    cfg_path = tmp_path / "settings.json"
+    raw_content = json.dumps({"triggers": trigger_payload})
+    cfg_path.write_text(raw_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is is_valid
+    if not is_valid:
+        assert mgr.last_error_category == "invalid_content"
+        assert cfg_path.read_text(encoding="utf-8") == raw_content
+
+
+def test_validation_triggers_partial_fill_with_defaults(tmp_path: Path) -> None:
+    """CFG-B05: Preserva trigger especificado e preenche ausentes com padrões."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"triggers": {"volume": False}}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.triggers["volume"] is False
+    assert mgr.config.triggers["metadata"] is True
+    assert mgr.config.triggers["playback"] is True
+
+
+def test_validation_backward_compatibility_sparse_fields(tmp_path: Path) -> None:
+    """CFG-B06: Arquivo antigo parcialmente preenchido é preservado e complementado."""
+    cfg_path = tmp_path / "settings.json"
+    sparse_data = {"volume_step": 10}
+    cfg_path.write_text(json.dumps(sparse_data), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 10
+    # Todos os outros campos receberam os padrões
+    assert mgr.config.hud_display_time == 3
+    assert mgr.config.websocket_port == 8974
+    assert mgr.config.hud_position == "bottom_right"
+    assert mgr.config.log_level == "INFO"
+    assert mgr.config.spotify_integration is False
+    assert mgr.config.hotkeys["play_pause"] == "alt gr+p"
+    assert mgr.config.triggers["volume"] is True
+
+    # O arquivo em disco NÃO foi sobrescrito automaticamente
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == sparse_data
+
+
+def test_validation_unknown_fields_preserved_on_disk(tmp_path: Path) -> None:
+    """CFG-B06: Campos desconhecidos são ignorados em memória e preservados no disco."""
+    cfg_path = tmp_path / "settings.json"
+    future_data = {
+        "volume_step": 12,
+        "future_option": "custom_value",
+        "nested_unknown": {"foo": "bar"},
+    }
+    cfg_path.write_text(json.dumps(future_data), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 12
+    assert not hasattr(mgr.config, "future_option")
+    # O arquivo físico preservou integralmente os campos desconhecidos
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == future_data
+
+
+def test_validation_preserves_last_valid_state_and_recovers_when_fixed(tmp_path: Path) -> None:
+    """CFG-B07: Preserva a última configuração válida na presença de valor inválido e recupera."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(
+        json.dumps({"volume_step": 15, "websocket_port": 9123}),
+        encoding="utf-8",
+    )
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 15
+    assert mgr.config.websocket_port == 9123
+
+    # 1. Modifica o arquivo com um tipo de campo inválido
+    invalid_content = json.dumps({"volume_step": "cem"})
+    cfg_path.write_text(invalid_content, encoding="utf-8")
+
+    reloaded = mgr.reload()
+    assert mgr.last_load_succeeded is False
+    assert mgr.last_error_category == "invalid_content"
+    # Estado anterior permanece em memória
+    assert reloaded.volume_step == 15
+    assert reloaded.websocket_port == 9123
+    assert mgr.config.volume_step == 15
+    assert mgr.config.websocket_port == 9123
+    # Arquivo no disco continua intacto
+    assert cfg_path.read_text(encoding="utf-8") == invalid_content
+
+    # 2. Corrige o arquivo com novo valor válido
+    cfg_path.write_text(json.dumps({"volume_step": 20}), encoding="utf-8")
+    recovered = mgr.reload()
+    assert mgr.last_load_succeeded is True
+    assert mgr.last_error_category is None
+    assert recovered.volume_step == 20
+    assert mgr.config.volume_step == 20
