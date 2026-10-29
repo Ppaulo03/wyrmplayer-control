@@ -59,6 +59,12 @@ class HotkeyManager:
         with self._lock:
             return len(self._native_callbacks)
 
+    @property
+    def is_native_thread_alive(self) -> bool:
+        """Retorna se a thread nativa está atualmente viva."""
+        with self._lock:
+            return bool(self._native_thread and self._native_thread.is_alive())
+
     # Métodos delegados para keyboard_utils
 
     def _safe_hotkey_callback(self, name: str, callback: Callable[[], None]) -> Callable[[], None]:
@@ -73,21 +79,67 @@ class HotkeyManager:
 
         return wrapped
 
-    def _clear_keyboard_hotkeys(self) -> None:
-        """Remove os atalhos registrados pelo aplicativo na biblioteca keyboard."""
+    def _clear_keyboard_hotkeys(self) -> bool:
+        """Remove os atalhos registrados pelo aplicativo na biblioteca keyboard.
+
+        Retorna True se todos os handlers foram removidos com sucesso, ou False
+        se algum handler falhou na remoção (mantendo as referências para tentativa posterior).
+        """
+        failed_handlers: list[Callable[..., Any]] = []
         for remove_fn in self._keyboard_remove_handlers:
             try:
                 keyboard.remove_hotkey(remove_fn)
             except Exception as e:
-                logger.debug("Erro ao remover hotkey do keyboard: %s", e)
-        self._keyboard_remove_handlers.clear()
+                logger.error("Erro ao remover hotkey do backend keyboard: %s", e)
+                failed_handlers.append(remove_fn)
+
+        self._keyboard_remove_handlers = failed_handlers
+        if failed_handlers:
+            logger.warning(
+                "Limpeza incompleta no backend keyboard: %d handler(s) retido(s) para recuperação.",
+                len(failed_handlers),
+            )
+            return False
+
+        return True
+
+    def _rollback_keyboard_handlers(self, handlers: list[Callable[..., Any]]) -> bool:
+        """Executa rollback de handlers registrados durante tentativa falha de registro.
+
+        Retorna True se todos os handlers foram removidos com sucesso.
+        Se algum falhar, ele é incorporado a _keyboard_remove_handlers para rastreamento.
+        """
+        unremoved: list[Callable[..., Any]] = []
+        for handler in handlers:
+            try:
+                keyboard.remove_hotkey(handler)
+            except Exception as e:
+                logger.error("Erro no rollback de handler do keyboard: %s", e)
+                unremoved.append(handler)
+
+        if unremoved:
+            self._keyboard_remove_handlers.extend(unremoved)
+            return False
+
+        return True
 
     def _clear_native_hotkeys(self) -> bool:
-        """Remove os atalhos registrados no backend nativo sem derrubar a thread."""
-        if not self._is_windows or not (self._native_thread and self._native_thread.is_alive()):
-            self._native_callbacks.clear()
+        """Remove os atalhos registrados no backend nativo sem derrubar a thread.
+
+        Retorna True se confirmado que nenhum atalho nativo está ativo.
+        """
+        if not self._is_windows:
             return True
-        return self._send_native_command("clear")
+
+        if not (self._native_thread and self._native_thread.is_alive()):
+            return len(self._native_callbacks) == 0
+
+        ok = self._send_native_command("clear")
+        if not ok:
+            logger.warning("Falha ou timeout ao desregistrar hotkeys nativas.")
+            return False
+
+        return True
 
     def _parse_shortcut_native(self, shortcut: str) -> tuple[int, int] | None:
         """Converte combinação textual para (mods, virtual_key) do WinAPI."""
@@ -147,6 +199,8 @@ class HotkeyManager:
         if self._native_thread and self._native_thread.is_alive():
             return True
 
+        # Se a referência anterior é de uma thread morta, limpa antes de criar nova
+        self._native_thread = None
         self._native_ready.clear()
         self._native_stop.clear()
 
@@ -172,10 +226,19 @@ class HotkeyManager:
 
                     try:
                         if command == "clear":
+                            failed_ids: list[int] = []
                             for hotkey_id in list(self._native_callbacks.keys()):
-                                self._user32.UnregisterHotKey(None, hotkey_id)
-                                self._native_callbacks.pop(hotkey_id, None)
-                            result["ok"] = True
+                                ok = bool(self._user32.UnregisterHotKey(None, hotkey_id))
+                                if ok:
+                                    self._native_callbacks.pop(hotkey_id, None)
+                                else:
+                                    failed_ids.append(hotkey_id)
+                                    logger.error(
+                                        "Erro ao desregistrar hotkey nativa ID %d (codigo=%s).",
+                                        hotkey_id,
+                                        ctypes.get_last_error(),
+                                    )
+                            result["ok"] = len(failed_ids) == 0 and len(self._native_callbacks) == 0
                         elif command == "register_batch":
                             registrations = cast(
                                 list[tuple[int, int, str, Callable[[], None]]], payload
@@ -200,11 +263,21 @@ class HotkeyManager:
 
                             result["ok"] = registered_count > 0
                         elif command == "stop":
+                            failed_ids = []
                             for hotkey_id in list(self._native_callbacks.keys()):
-                                self._user32.UnregisterHotKey(None, hotkey_id)
-                                self._native_callbacks.pop(hotkey_id, None)
-                            result["ok"] = True
-                            self._native_stop.set()
+                                ok = bool(self._user32.UnregisterHotKey(None, hotkey_id))
+                                if ok:
+                                    self._native_callbacks.pop(hotkey_id, None)
+                                else:
+                                    failed_ids.append(hotkey_id)
+                                    logger.error(
+                                        "Erro ao desregistrar hotkey ID %d no stop (codigo=%s).",
+                                        hotkey_id,
+                                        ctypes.get_last_error(),
+                                    )
+                            result["ok"] = len(failed_ids) == 0 and len(self._native_callbacks) == 0
+                            if result["ok"]:
+                                self._native_stop.set()
                         else:
                             result["ok"] = False
                     except Exception as e:
@@ -239,63 +312,93 @@ class HotkeyManager:
         done_event = threading.Event()
         result: dict[str, Any] = {}
         self._native_commands.put((command, payload, done_event, result))
-        done_event.wait(timeout=2.0)
+        if not done_event.wait(timeout=2.0):
+            logger.error("Timeout aguardando processamento do comando nativo '%s'.", command)
+            return False
         return bool(result.get("ok", False))
 
     def _setup_low_level_keyboard_hotkeys(self, hotkey_map: dict[str, Callable[[], None]]) -> bool:
-        """Registra hotkeys usando biblioteca keyboard com suporte a fullscreen."""
+        """Registra hotkeys usando biblioteca keyboard com suporte a fullscreen.
+
+        Aplica política de best-effort por combinação: cada atalho lógico precisa
+        ter ao menos uma variante registrada com sucesso. Variantes alternativas
+        podem falhar sem invalidar o atalho caso outra variante equivalente funcione.
+        """
         if not hotkey_map:
             return False
 
-        unsupported: list[str] = []
         new_handlers: list[Callable[..., Any]] = []
+        registered_by_shortcut: dict[str, list[str]] = {}
+        failed_variants: list[tuple[str, str]] = []
+        unsupported_shortcuts: list[str] = []
 
         try:
             for shortcut, callback in hotkey_map.items():
                 safe_callback = self._safe_hotkey_callback(shortcut, callback)
                 variants = keyboard_utils.expand_shortcut_variants(shortcut)
-                registered_variants = 0
+                registered_variants: list[str] = []
+
                 for variant in variants:
                     try:
                         # suppress=False allows keys to pass through to the game
                         # This is the key to fullscreen game support
                         handler = keyboard.add_hotkey(variant, safe_callback, suppress=False)
                         new_handlers.append(handler)
-                        registered_variants += 1
+                        registered_variants.append(variant)
                         logger.info("Hotkey configurada (fullscreen compatible): %s", variant)
                     except Exception as e:
-                        logger.error("Erro ao registrar hotkey '%s': %s", variant, e)
+                        logger.warning(
+                            "Falha ao registrar variante '%s' do atalho '%s': %s",
+                            variant,
+                            shortcut,
+                            e,
+                        )
+                        failed_variants.append((shortcut, variant))
 
-                if registered_variants == 0:
-                    unsupported.append(shortcut)
+                if registered_variants:
+                    registered_by_shortcut[shortcut] = registered_variants
+                else:
+                    unsupported_shortcuts.append(shortcut)
+                    logger.error(
+                        "Nenhuma variante funcional registrada para o atalho '%s'.",
+                        shortcut,
+                    )
 
-            if unsupported:
-                logger.warning(
-                    "Hotkeys não suportadas: %s",
-                    ", ".join(set(unsupported)),
-                )
+            # Para ter sucesso, todos os atalhos configurados devem ter ao menos uma variante ativa
+            all_shortcuts_covered = len(unsupported_shortcuts) == 0 and len(
+                registered_by_shortcut
+            ) == len(hotkey_map)
 
-            ok = len(set(unsupported)) < len(hotkey_map) and len(new_handlers) > 0
-            if ok:
-                self._keyboard_remove_handlers = new_handlers
-                logger.info("Sistema de Hotkeys configurado com sucesso (fullscreen compatible).")
+            if all_shortcuts_covered:
+                self._keyboard_remove_handlers.extend(new_handlers)
+                if failed_variants:
+                    logger.warning(
+                        "Sistema de Hotkeys configurado com sucesso parcial/best-effort: "
+                        "%d variantes registradas, %d variantes alternativas falharam.",
+                        len(new_handlers),
+                        len(failed_variants),
+                    )
+                else:
+                    logger.info(
+                        "Sistema de Hotkeys configurado integralmente (fullscreen compatible)."
+                    )
                 return True
 
-            # Rollback das variantes registradas nesta tentativa em caso de falha de validação
-            for handler in new_handlers:
-                try:
-                    keyboard.remove_hotkey(handler)
-                except Exception:
-                    pass
+            # Falha de cobertura: abandonar tentativa e executar rollback rigoroso
+            logger.warning(
+                "Abandonando backend keyboard: atalhos sem cobertura: %s. Executando rollback.",
+                ", ".join(unsupported_shortcuts),
+            )
+            rollback_ok = self._rollback_keyboard_handlers(new_handlers)
+            if not rollback_ok:
+                logger.error(
+                    "Rollback parcial do keyboard falhou; handlers retidos para evitar conflito."
+                )
             return False
 
         except Exception as e:
-            logger.exception("Falha durante o registro de hotkeys no keyboard: %s", e)
-            for handler in new_handlers:
-                try:
-                    keyboard.remove_hotkey(handler)
-                except Exception:
-                    pass
+            logger.exception("Exceção inesperada no registro de hotkeys do keyboard: %s", e)
+            self._rollback_keyboard_handlers(new_handlers)
             return False
 
     def _setup_native_hotkeys(self, hotkey_map: dict[str, Callable[[], None]]) -> bool:
@@ -304,6 +407,9 @@ class HotkeyManager:
             return False
 
         if not self._clear_native_hotkeys():
+            logger.warning(
+                "Não foi possível confirmar limpeza nativa antes de registrar novo lote."
+            )
             return False
 
         registrations: list[tuple[int, int, str, Callable[[], None]]] = []
@@ -322,7 +428,7 @@ class HotkeyManager:
 
         if unsupported:
             logger.warning(
-                "Hotkeys nao suportadas no backend nativo: %s",
+                "Hotkeys não suportadas no backend nativo: %s",
                 ", ".join(unsupported),
             )
 
@@ -335,12 +441,34 @@ class HotkeyManager:
             return True
 
         # Rollback se falhar
+        logger.warning("Falha no registro do lote nativo; executando rollback.")
         self._clear_native_hotkeys()
         return False
 
     def setup(self, force_backend_reset: bool = False) -> None:
         """Registra os atalhos baseados na configuração persistente."""
         with self._lock:
+            # 1. Limpeza dos backends anteriores
+            if force_backend_reset:
+                if not self._stop_unlocked():
+                    logger.warning(
+                        "Reset forçado de backend não foi concluído com sucesso; "
+                        "abortando reconfiguração para evitar registros conflitantes."
+                    )
+                    return
+            else:
+                kb_clean = self._clear_keyboard_hotkeys()
+                native_clean = self._clear_native_hotkeys()
+                if not kb_clean or not native_clean:
+                    logger.warning(
+                        "Limpeza prévia de hotkeys inconclusiva (kb=%s, native=%s); "
+                        "abortando nova configuração para evitar duplicatas ou conflitos.",
+                        kb_clean,
+                        native_clean,
+                    )
+                    return
+                self._active_backend = None
+
             cfg = self.config.load()
             hk = cfg.hotkeys
 
@@ -354,26 +482,25 @@ class HotkeyManager:
             }
             hotkey_map = {shortcut: cb for shortcut, cb in hotkey_map.items() if shortcut}
 
-            if force_backend_reset:
-                self._stop_unlocked()
-            else:
-                self._clear_keyboard_hotkeys()
-                self._clear_native_hotkeys()
-                self._active_backend = None
-
             if not hotkey_map:
                 logger.info("Nenhuma hotkey configurada.")
                 return
 
-            # Tenta backend keyboard com suporte a fullscreen (suppress=False)
+            # 2. Tenta backend keyboard com suporte a fullscreen (suppress=False)
             if self._setup_low_level_keyboard_hotkeys(hotkey_map):
                 self._active_backend = "keyboard"
                 return
 
-            # Fallback: backend nativo do Windows (não funciona em fullscreen)
+            # 3. Fallback: backend nativo do Windows (não funciona em fullscreen)
             if self._is_windows:
-                # Garante que keyboard não tem resquícios
-                self._clear_keyboard_hotkeys()
+                # O fallback SÓ pode acontecer se o keyboard estiver comprovadamente limpo!
+                if not self._clear_keyboard_hotkeys():
+                    logger.error(
+                        "Backend keyboard possui handlers pendentes após tentativa falha; "
+                        "bloqueando fallback nativo para evitar ativação conflitante."
+                    )
+                    return
+
                 if self._setup_native_hotkeys(hotkey_map):
                     self._active_backend = "native"
                     return
@@ -381,24 +508,45 @@ class HotkeyManager:
             self._active_backend = None
             logger.warning("Falha ao registrar hotkeys em todos os backends disponíveis.")
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Libera registros de hotkeys no encerramento do app."""
         with self._lock:
-            self._stop_unlocked()
+            return self._stop_unlocked()
 
-    def _stop_unlocked(self) -> None:
+    def _stop_unlocked(self) -> bool:
         """Libera registros internamente (deve ser chamado sob self._lock)."""
-        # Stop native hotkeys
+        native_ok = True
         if self._is_windows:
             if self._native_thread and self._native_thread.is_alive():
-                self._send_native_command("stop")
+                cmd_ok = self._send_native_command("stop")
                 self._native_thread.join(timeout=1.0)
-            self._native_thread = None
-            self._native_callbacks.clear()
+                if self._native_thread.is_alive():
+                    logger.error(
+                        "Thread nativa ainda está ativa após timeout de join; mantendo referência."
+                    )
+                    native_ok = False
+                elif not cmd_ok:
+                    logger.error("Comando 'stop' nativo falhou ao desregistrar hotkeys.")
+                    native_ok = False
+                else:
+                    self._native_thread = None
+                    self._native_callbacks.clear()
+            else:
+                self._native_thread = None
+                self._native_callbacks.clear()
 
-        # Stop keyboard library hotkeys
-        self._clear_keyboard_hotkeys()
-        self._active_backend = None
+        keyboard_ok = self._clear_keyboard_hotkeys()
+
+        if native_ok and keyboard_ok:
+            self._active_backend = None
+            return True
+
+        logger.warning(
+            "Encerramento de hotkeys incompleto (keyboard_ok=%s, native_ok=%s).",
+            keyboard_ok,
+            native_ok,
+        )
+        return False
 
     def is_input_desktop_accessible(self) -> bool:
         """Retorna se o desktop de entrada atual esta acessivel (sessao desbloqueada)."""
