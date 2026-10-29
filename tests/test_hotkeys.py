@@ -290,21 +290,40 @@ def test_native_clear_timeout_blocks_keyboard(
     fake_keyboard: FakeKeyboard,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Timeout na limpeza nativa bloqueia a ativação de novo backend e preserva estado."""
+    """Timeout real na espera pelo comando clear bloqueia nova ativação e preserva estado."""
     monkeypatch.setattr(hotkey_manager, "_is_windows", True)
 
+    # Mock da thread nativa como ativa e com user32 simulado
     mock_thread = MagicMock()
     mock_thread.is_alive.return_value = True
     hotkey_manager._native_thread = mock_thread
+    hotkey_manager._user32 = MagicMock()
     hotkey_manager._native_callbacks[1] = lambda: None
 
-    # Simula timeout retornando False
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", lambda cmd, p=None: False)
+    # Simula timeout determinístico interceptando Event.wait chamado por _send_native_command
+    wait_timeouts: list[float | None] = []
 
+    def fast_timeout_wait(self: threading.Event, timeout: float | None = None) -> bool:
+        wait_timeouts.append(timeout)
+        # Retorna False imediatamente representando expiração de timeout
+        return False
+
+    monkeypatch.setattr(threading.Event, "wait", fast_timeout_wait)
+
+    # Executa setup() sem substituir _send_native_command
     hotkey_manager.setup()
 
+    # Valida que o comando 'clear' foi efetivamente enviado para a fila nativa
+    cmd, _, _, _ = hotkey_manager._native_commands.get_nowait()
+    assert cmd == "clear"
+
+    # Valida que a espera de timeout de 2.0s do comando foi exercitada
+    assert 2.0 in wait_timeouts
+
+    # Confirma que a falha de timeout bloqueou a ativação do keyboard e preservou o estado
     assert len(fake_keyboard.registered_hotkeys) == 0
     assert len(hotkey_manager._native_callbacks) == 1
+    assert hotkey_manager.active_backend != "keyboard"
 
 
 def test_native_clear_recovery(
@@ -372,45 +391,90 @@ def test_native_stop_recovery_and_cleanup(
     hotkey_manager: HotkeyManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Recuperação de encerramento da thread nativa após falha anterior."""
+    """Recuperação de encerramento da thread nativa após falha anterior com encerramento causal."""
     monkeypatch.setattr(hotkey_manager, "_is_windows", True)
 
-    mock_thread = MagicMock()
+    stop_call_count = 0
     is_alive = True
+
+    def fake_send(cmd: str, p: Any = None) -> bool:
+        nonlocal stop_call_count
+        if cmd == "stop":
+            stop_call_count += 1
+            if stop_call_count == 1:
+                return False
+            # Segunda tentativa de stop obtém sucesso
+            return True
+        return True
+
+    def fake_join(timeout: float | None = None) -> None:
+        nonlocal is_alive
+        # A thread só encerra como consequência direta do sucesso da 2ª tentativa de stop
+        if stop_call_count >= 2:
+            is_alive = False
+
+    mock_thread = MagicMock()
     mock_thread.is_alive.side_effect = lambda: is_alive
+    mock_thread.join.side_effect = fake_join
     hotkey_manager._native_thread = mock_thread
 
-    cmd_ok = False
+    monkeypatch.setattr(hotkey_manager, "_send_native_command", fake_send)
 
-    def mock_send(cmd: str, p: Any = None) -> bool:
-        return cmd_ok
-
-    monkeypatch.setattr(hotkey_manager, "_send_native_command", mock_send)
-
-    # 1ª tentativa: falha
-    assert hotkey_manager.stop() is False
+    # 1ª tentativa: falha do comando stop
+    res1 = hotkey_manager.stop()
+    assert res1 is False
+    assert stop_call_count == 1
+    # Thread permanece ativa e rastreada
+    assert is_alive is True
     assert hotkey_manager._native_thread is mock_thread
 
-    # Thread finalmente atende o stop
-    cmd_ok = True
-    is_alive = False
-
-    # 2ª tentativa: sucesso
-    assert hotkey_manager.stop() is True
+    # 2ª tentativa: stop é reenviado, obtém sucesso e finaliza a thread
+    res2 = hotkey_manager.stop()
+    assert res2 is True
+    assert stop_call_count == 2
+    # Confirma que a thread encerrou e referências foram liberadas
+    assert is_alive is False
     assert hotkey_manager._native_thread is None
 
 
 def test_repeated_stop_calls_are_safe_and_idempotent(
     hotkey_manager: HotkeyManager,
+    fake_keyboard: FakeKeyboard,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Chamadas repetidas de stop() são seguras, idempotentes e não lançam exceções."""
+    """Chamadas repetidas de stop() após configuração real são seguras e idempotentes."""
     monkeypatch.setattr(hotkey_manager, "_is_windows", True)
-    assert hotkey_manager.stop() is True
-    assert hotkey_manager.stop() is True
-    assert hotkey_manager.stop() is True
+
+    # 1. Configura hotkeys utilizando o FakeKeyboard
+    hotkey_manager.setup()
+
+    # 2. Confirma que existem handlers ativos
+    assert hotkey_manager.active_backend == "keyboard"
+    assert hotkey_manager.registered_keyboard_count > 0
+    assert len(fake_keyboard.registered_hotkeys) > 0
+
+    # 3. Executa a primeira chamada de stop()
+    first_stop = hotkey_manager.stop()
+    assert first_stop is True
+
+    # 4. Confirma a remoção de todos os handlers
+    assert hotkey_manager.registered_keyboard_count == 0
+    assert len(fake_keyboard.registered_hotkeys) == 0
+
+    # 5. Confirma que active_backend indica ausência de backend operacional
+    assert hotkey_manager.active_backend is None
+
+    # 6. Executa stop() novamente para verificar idempotência
+    second_stop = hotkey_manager.stop()
+    assert second_stop is True
+    third_stop = hotkey_manager.stop()
+    assert third_stop is True
+
+    # 7. Confirma que nenhuma chamada adicional cria recursos ou provoca exceções indevidas
     assert hotkey_manager.registered_keyboard_count == 0
     assert hotkey_manager.registered_native_count == 0
+    assert hotkey_manager.active_backend is None
+    assert len(fake_keyboard.registered_hotkeys) == 0
 
 
 # ==============================================================================
@@ -647,12 +711,29 @@ def test_r03_real_thread_lifecycle_with_guaranteed_cleanup(
         assert len(hotkey_manager._native_callbacks) == 0
 
     finally:
-        # Garante o encerramento da thread mesmo se asserções intermediárias falharem
-        stop_ok = hotkey_manager.stop()
-        assert stop_ok is True
-        if thread.is_alive():
+        # 1. Restaura flags de falha para garantir que a WinAPI simulada permita o encerramento
+        fake_user32.fail_all_unregister = False
+        fake_user32.fail_all_register = False
+
+        # 2. Executa tentativa de stop() sem que eventuais exceções interrompam o teardown
+        stop_ok = False
+        teardown_exc: Exception | None = None
+        try:
+            stop_ok = hotkey_manager.stop()
+        except Exception as e:
+            teardown_exc = e
+
+        # 3. Executa join() independentemente do resultado de stop(), sempre com timeout controlado
+        if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
-        assert not thread.is_alive(), "Thread nativa falhou ao encerrar dentro do timeout"
+
+        # 4. Verifica e reporta explicitamente se a thread terminou e se stop() foi bem-sucedido
+        thread_terminated = thread is not None and not thread.is_alive()
+        assert thread_terminated, (
+            "Falha de encerramento: thread nativa permaneceu ativa após timeout de join"
+        )
+        assert teardown_exc is None, f"Exceção durante stop() no teardown: {teardown_exc}"
+        assert stop_ok is True, "Falha de encerramento: hotkey_manager.stop() retornou False"
 
 
 # ==============================================================================
