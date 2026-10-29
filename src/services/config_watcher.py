@@ -4,7 +4,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 
-from src.core.config import ConfigManager
+from src.core.config import ERROR_CATEGORY_TRANSIENT_IO, ConfigManager
 from src.core.hotkeys import HotkeyManager
 from src.core.logging_config import apply_logging_configuration
 from src.core.state import AppState
@@ -27,6 +27,7 @@ class ConfigWatcher:
         config: ConfigManager,
         on_websocket_port_change: Callable[[int], Awaitable[None]],
         on_spotify_integration_change: Callable[[], None],
+        max_transient_retries: int = 5,
     ):
         self.hotkeys = hotkeys
         self.hud = hud
@@ -35,6 +36,7 @@ class ConfigWatcher:
         self.on_websocket_port_change = on_websocket_port_change
         self.on_spotify_integration_change = on_spotify_integration_change
         self.settings_path = config.config_path
+        self.max_transient_retries = max_transient_retries
 
         # Internal state
         self.last_mtime: float | None = None
@@ -45,6 +47,10 @@ class ConfigWatcher:
         self.last_log_file = current_cfg.log_file
         self.last_websocket_port = current_cfg.websocket_port
         self.last_spotify_integration = current_cfg.spotify_integration
+
+        # Transient retry tracking
+        self._transient_retry_count: int = 0
+        self._last_failed_mtime: float | None = None
 
         # Debounce/Windows Session state
         self.raw_input_desktop_accessible = hotkeys.is_input_desktop_accessible()
@@ -57,7 +63,10 @@ class ConfigWatcher:
 
         if os.path.exists(self.settings_path):
             try:
-                self.last_mtime = os.path.getmtime(self.settings_path)
+                if getattr(self.config, "last_error_category", None) == ERROR_CATEGORY_TRANSIENT_IO:
+                    self.last_mtime = None
+                else:
+                    self.last_mtime = os.path.getmtime(self.settings_path)
             except OSError:
                 self.last_mtime = None
 
@@ -115,16 +124,60 @@ class ConfigWatcher:
         try:
             old_layout = self.last_hud_layout
             cfg = self.config.reload()
-            # Atualiza mtime para não reprocessar repetidamente sem nova alteração
-            self.last_mtime = current_mtime
 
             if not getattr(self.config, "last_load_succeeded", True):
+                error_category = getattr(self.config, "last_error_category", None)
+                if error_category == ERROR_CATEGORY_TRANSIENT_IO:
+                    if self._last_failed_mtime != current_mtime:
+                        self._last_failed_mtime = current_mtime
+                        self._transient_retry_count = 0
+
+                    self._transient_retry_count += 1
+                    if self._transient_retry_count < self.max_transient_retries:
+                        if self._transient_retry_count == 1:
+                            logger.warning(
+                                "Falha temporária de I/O ao ler %s (tentativa %d/%d). "
+                                "Uma nova tentativa será realizada. "
+                                "Mantendo a configuração atual em execução.",
+                                self.settings_path,
+                                self._transient_retry_count,
+                                self.max_transient_retries,
+                            )
+                        else:
+                            logger.debug(
+                                "Falha temporária de I/O ao ler %s (tentativa %d/%d).",
+                                self.settings_path,
+                                self._transient_retry_count,
+                                self.max_transient_retries,
+                            )
+                        # Não atualiza self.last_mtime para permitir nova tentativa
+                        return
+
+                    # Limite de tentativas atingido: avança mtime para cessar retries
+                    self.last_mtime = current_mtime
+                    logger.error(
+                        "Limite de %d tentativas de leitura atingido para %s. "
+                        "Mantendo a configuração anterior até nova alteração do arquivo.",
+                        self.max_transient_retries,
+                        self.settings_path,
+                    )
+                    return
+
+                # Falha por conteúdo inválido (JSONDecodeError, UnicodeDecodeError, etc.)
+                self.last_mtime = current_mtime
+                self._transient_retry_count = 0
+                self._last_failed_mtime = None
                 logger.warning(
                     "Alteração detectada em %s, mas o conteúdo é inválido ou ilegível. "
                     "Mantendo a configuração atual em execução.",
                     self.settings_path,
                 )
                 return
+
+            # Carga bem-sucedida: atualiza mtime e reseta rastreamento de retry
+            self.last_mtime = current_mtime
+            self._transient_retry_count = 0
+            self._last_failed_mtime = None
 
             logger.info("Mudança de arquivo detectada! mtime: %s. Recarregando...", self.last_mtime)
 

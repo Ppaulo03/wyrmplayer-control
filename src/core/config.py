@@ -10,6 +10,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+ERROR_CATEGORY_INVALID_CONTENT = "invalid_content"
+ERROR_CATEGORY_TRANSIENT_IO = "transient_io"
+
 
 @dataclass
 class AppConfig:
@@ -73,6 +76,7 @@ class ConfigManager:
     def __init__(self, config_file: str = "settings.json") -> None:
         self._lock = threading.RLock()
         self.last_load_succeeded: bool = False
+        self.last_error_category: str | None = None
         if os.path.isabs(config_file):
             self.config_path = config_file
         else:
@@ -102,10 +106,30 @@ class ConfigManager:
                     self.config_path,
                 )
                 default_cfg = AppConfig()
-                self.config = default_cfg
+                has_previous = hasattr(self, "config") and self.config is not None
                 save_ok = self.save(default_cfg)
                 self.last_load_succeeded = save_ok
-                return default_cfg
+                if save_ok:
+                    self.last_error_category = None
+                    return self.config
+
+                # Falha ao recriar / persistir arquivo inexistente
+                self.last_error_category = ERROR_CATEGORY_TRANSIENT_IO
+                if has_previous:
+                    logger.warning(
+                        "Falha ao recriar arquivo de configurações %s. "
+                        "Mantendo a última configuração válida em memória.",
+                        self.config_path,
+                    )
+                    return self.config
+                else:
+                    logger.warning(
+                        "Falha ao persistir configurações padrão em %s na inicialização. "
+                        "Utilizando configurações padrão transitórias em memória.",
+                        self.config_path,
+                    )
+                    self.config = default_cfg
+                    return default_cfg
 
             try:
                 with open(self.config_path, encoding="utf-8") as f:
@@ -119,13 +143,14 @@ class ConfigManager:
                         self.config_path,
                         type(data).__name__,
                     )
-                    return self._handle_load_failure()
+                    return self._handle_load_failure(ERROR_CATEGORY_INVALID_CONTENT)
 
                 allowed_keys = {f.name for f in dataclass_fields(AppConfig)}
                 filtered_data = {k: v for k, v in data.items() if k in allowed_keys}
                 new_cfg = AppConfig(**filtered_data)
                 self.config = new_cfg
                 self.last_load_succeeded = True
+                self.last_error_category = None
                 return new_cfg
 
             except json.JSONDecodeError as err:
@@ -137,7 +162,7 @@ class ConfigManager:
                     err.colno,
                     err.msg,
                 )
-                return self._handle_load_failure()
+                return self._handle_load_failure(ERROR_CATEGORY_INVALID_CONTENT)
 
             except UnicodeDecodeError as err:
                 logger.error(
@@ -146,7 +171,7 @@ class ConfigManager:
                     self.config_path,
                     err,
                 )
-                return self._handle_load_failure()
+                return self._handle_load_failure(ERROR_CATEGORY_INVALID_CONTENT)
 
             except (PermissionError, OSError) as err:
                 logger.error(
@@ -155,7 +180,7 @@ class ConfigManager:
                     self.config_path,
                     err,
                 )
-                return self._handle_load_failure()
+                return self._handle_load_failure(ERROR_CATEGORY_TRANSIENT_IO)
 
             except Exception as err:
                 logger.error(
@@ -164,11 +189,14 @@ class ConfigManager:
                     self.config_path,
                     err,
                 )
-                return self._handle_load_failure()
+                return self._handle_load_failure(ERROR_CATEGORY_TRANSIENT_IO)
 
-    def _handle_load_failure(self) -> AppConfig:
+    def _handle_load_failure(
+        self, error_category: str = ERROR_CATEGORY_INVALID_CONTENT
+    ) -> AppConfig:
         """Trata falha de carregamento sem sobrescrever o arquivo em disco."""
         self.last_load_succeeded = False
+        self.last_error_category = error_category
         if hasattr(self, "config") and self.config is not None:
             logger.warning(
                 "Mantendo a última configuração válida em memória para %s.",

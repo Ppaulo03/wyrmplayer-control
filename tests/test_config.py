@@ -696,3 +696,128 @@ def test_load_unicode_decode_error_preserves_state_and_file(tmp_path: Path) -> N
 
     # O arquivo em disco NÃO pode ter sido substituído por AppConfig padrão
     assert cfg_path.read_bytes() == b'{"key": "\xff\xfe\xfa\x80"}'
+
+
+# ==============================================================================
+# EST-02.2A.1 R01: Preservação de Estado na Falha de Recriação
+# ==============================================================================
+
+
+def test_first_initialization_successful(tmp_path: Path) -> None:
+    """R01 - Teste 1: Primeira inicialização sem arquivo cria padrões e persiste com sucesso."""
+    cfg_path = tmp_path / "settings.json"
+    assert not cfg_path.exists()
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+
+    assert mgr.last_load_succeeded is True
+    assert mgr.last_error_category is None
+    assert mgr.config.volume_step == 5
+    assert mgr.config.websocket_port == 8974
+    assert cfg_path.exists()
+
+    # Confirma que o arquivo gravado possui conteúdo JSON válido dos padrões
+    saved_data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved_data["volume_step"] == 5
+    assert saved_data["websocket_port"] == 8974
+
+
+def test_first_initialization_save_failure_uses_in_memory_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R01 - Teste 2: Primeira inicialização com falha de escrita usa padrões em memória,
+    registra falha de persistência e não deixa arquivo corrompido ou parcial.
+    """
+    cfg_path = tmp_path / "settings.json"
+    assert not cfg_path.exists()
+
+    def failing_replace(src: Any, dst: Any) -> None:
+        raise PermissionError("Permissão negada ao salvar na inicialização")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+
+    assert mgr.last_load_succeeded is False
+    assert mgr.last_error_category == "transient_io"
+    assert mgr.config.volume_step == 5
+    assert mgr.config.websocket_port == 8974
+    assert not cfg_path.exists()
+
+    # Confirma ausência de arquivos temporários (.tmp.)
+    tmp_files = list(tmp_path.glob(".*.tmp.*"))
+    assert tmp_files == []
+
+
+def test_reload_missing_file_save_failure_preserves_previous_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R01 - Teste 3: Quando arquivo desaparece e recriação falha, preserva a
+    configuração anterior em memória e define last_load_succeeded = False.
+    """
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"volume_step": 25, "websocket_port": 9100}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 25
+    assert mgr.config.websocket_port == 9100
+    prev_config_obj = mgr.config
+
+    # O arquivo desaparece externamente
+    cfg_path.unlink()
+    assert not cfg_path.exists()
+
+    # Simula falha ao recriar o arquivo via save()
+    def failing_replace(src: Any, dst: Any) -> None:
+        raise PermissionError("Falha simulada na recriação do settings.json")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    reloaded_cfg = mgr.reload()
+
+    # Preserva configuração anterior e sua identidade de objeto
+    assert mgr.last_load_succeeded is False
+    assert mgr.last_error_category == "transient_io"
+    assert mgr.config is prev_config_obj
+    assert reloaded_cfg is prev_config_obj
+    assert mgr.config.volume_step == 25
+    assert mgr.config.websocket_port == 9100
+    assert not cfg_path.exists()
+
+
+def test_reload_missing_file_recovery_after_restoring_write_conditions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R01 - Teste 4: Após falha de recriação, quando as condições de escrita são restabelecidas,
+    a recriação é concluída e last_load_succeeded se torna True.
+    """
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"volume_step": 30}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 30
+
+    # 1. Arquivo desaparece e tentativa de recriar falha
+    cfg_path.unlink()
+
+    def failing_replace(src: Any, dst: Any) -> None:
+        raise PermissionError("Permissão negada temporária")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    mgr.reload()
+    assert mgr.last_load_succeeded is False
+    assert mgr.config.volume_step == 30
+
+    # 2. Restabelece condições de escrita
+    monkeypatch.undo()
+
+    # Nova tentativa de carregamento/recriação
+    recovered_cfg = mgr.reload()
+    assert mgr.last_load_succeeded is True
+    assert mgr.last_error_category is None
+    assert cfg_path.exists()
+    assert recovered_cfg.volume_step == 5  # Recreação padrão persistida
+    assert mgr.config.volume_step == 5
