@@ -115,10 +115,18 @@ class ConfigWatcher:
         try:
             old_layout = self.last_hud_layout
             cfg = self.config.reload()
-            # Atualiza mtime apos leitura confirmada
-            self.last_mtime = os.path.getmtime(self.settings_path)
+            # Atualiza mtime para não reprocessar repetidamente sem nova alteração
+            self.last_mtime = current_mtime
 
-            logger.info(f"Mudança de arquivo detectada! mtime: {self.last_mtime}. Recarregando...")
+            if not getattr(self.config, "last_load_succeeded", True):
+                logger.warning(
+                    "Alteração detectada em %s, mas o conteúdo é inválido ou ilegível. "
+                    "Mantendo a configuração atual em execução.",
+                    self.settings_path,
+                )
+                return
+
+            logger.info("Mudança de arquivo detectada! mtime: %s. Recarregando...", self.last_mtime)
 
             # Hotkeys change
             if cfg.hotkeys != self.last_hotkeys:

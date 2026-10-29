@@ -72,6 +72,7 @@ class ConfigManager:
 
     def __init__(self, config_file: str = "settings.json") -> None:
         self._lock = threading.RLock()
+        self.last_load_succeeded: bool = False
         if os.path.isabs(config_file):
             self.config_path = config_file
         else:
@@ -80,7 +81,7 @@ class ConfigManager:
             else:
                 base_dir = Path(__file__).resolve().parents[2]
             self.config_path = str((base_dir / config_file).resolve())
-        self.config = self.load()
+        self.config: AppConfig = self.load()
 
     def reload(self) -> AppConfig:
         """Força o recarregamento do arquivo e atualiza o estado interno."""
@@ -88,7 +89,12 @@ class ConfigManager:
             return self.load()
 
     def load(self) -> AppConfig:
-        """Carrega configurações do arquivo ou cria padrões se não existir."""
+        """Carrega configurações do arquivo ou cria padrões se não existir.
+
+        Distingue arquivo inexistente (criando padrões em disco) de arquivo
+        inválido/ilegível (mantendo o arquivo original intacto e preservando
+        a última configuração válida em memória).
+        """
         with self._lock:
             if not os.path.exists(self.config_path):
                 logger.info(
@@ -97,20 +103,87 @@ class ConfigManager:
                 )
                 default_cfg = AppConfig()
                 self.config = default_cfg
-                self.save()
+                save_ok = self.save(default_cfg)
+                self.last_load_succeeded = save_ok
                 return default_cfg
 
             try:
                 with open(self.config_path, encoding="utf-8") as f:
                     data = json.load(f)
-                    allowed_keys = {f.name for f in dataclass_fields(AppConfig)}
-                    filtered_data = {k: v for k, v in data.items() if k in allowed_keys}
-                    new_cfg = AppConfig(**filtered_data)
-                    self.config = new_cfg
-                    return new_cfg
-            except Exception as e:
-                logger.error(f"Erro ao carregar configurações de {self.config_path}: {e}")
-                return AppConfig()
+
+                if not isinstance(data, dict):
+                    logger.error(
+                        "Estrutura raiz inválida no arquivo de configurações %s: "
+                        "esperado objeto JSON (dict), obtido %s. "
+                        "O arquivo original não foi modificado.",
+                        self.config_path,
+                        type(data).__name__,
+                    )
+                    return self._handle_load_failure()
+
+                allowed_keys = {f.name for f in dataclass_fields(AppConfig)}
+                filtered_data = {k: v for k, v in data.items() if k in allowed_keys}
+                new_cfg = AppConfig(**filtered_data)
+                self.config = new_cfg
+                self.last_load_succeeded = True
+                return new_cfg
+
+            except json.JSONDecodeError as err:
+                logger.error(
+                    "JSON malformado no arquivo de configurações %s (linha %d, coluna %d): %s. "
+                    "O arquivo original não foi modificado.",
+                    self.config_path,
+                    err.lineno,
+                    err.colno,
+                    err.msg,
+                )
+                return self._handle_load_failure()
+
+            except UnicodeDecodeError as err:
+                logger.error(
+                    "Erro de decodificação UTF-8 no arquivo de configurações %s: %s. "
+                    "O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return self._handle_load_failure()
+
+            except (PermissionError, OSError) as err:
+                logger.error(
+                    "Falha de I/O ao ler arquivo de configurações %s: %s. "
+                    "O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return self._handle_load_failure()
+
+            except Exception as err:
+                logger.error(
+                    "Erro inesperado ao carregar configurações de %s: %s. "
+                    "O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return self._handle_load_failure()
+
+    def _handle_load_failure(self) -> AppConfig:
+        """Trata falha de carregamento sem sobrescrever o arquivo em disco."""
+        self.last_load_succeeded = False
+        if hasattr(self, "config") and self.config is not None:
+            logger.warning(
+                "Mantendo a última configuração válida em memória para %s.",
+                self.config_path,
+            )
+            return self.config
+
+        logger.warning(
+            "Nenhuma configuração válida prévia em memória; "
+            "utilizando configurações padrão em memória sem sobrescrever %s.",
+            self.config_path,
+        )
+        fallback_cfg = AppConfig()
+        self.config = fallback_cfg
+        return fallback_cfg
 
     def save(self, config: AppConfig | None = None) -> bool:
         """Salva o estado das configurações no arquivo JSON de forma atômica e thread-safe.

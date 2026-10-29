@@ -148,3 +148,70 @@ async def test_atomic_save_integration_with_config_watcher(tmp_path: Path) -> No
     # Confirma que a configuração recarregada corresponde aos valores persistidos
     assert real_config_manager.config.websocket_port == 9200
     assert real_config_manager.load().websocket_port == 9200
+
+
+async def test_config_watcher_ignores_invalid_json_and_recovers_when_fixed(
+    tmp_path: Path,
+) -> None:
+    """CFG-04: ConfigWatcher ignora JSON inválido, não reprocessa em loop
+    e recupera quando corrigido.
+    """
+    import json
+
+    settings_path = tmp_path / "settings.json"
+    real_config_manager = ConfigManager(config_file=str(settings_path))
+
+    initial_cfg = AppConfig(websocket_port=8974, log_level="INFO", log_file="init.log")
+    assert real_config_manager.save(initial_cfg) is True
+
+    mock_hotkeys = MagicMock()
+    mock_hotkeys.is_input_desktop_accessible.return_value = True
+    mock_hud = MagicMock()
+    on_ws_change = AsyncMock()
+    on_spotify_change = MagicMock()
+
+    watcher = ConfigWatcher(
+        hotkeys=mock_hotkeys,
+        hud=mock_hud,
+        state=AppState(),
+        config=real_config_manager,
+        on_websocket_port_change=on_ws_change,
+        on_spotify_integration_change=on_spotify_change,
+    )
+
+    initial_mtime = watcher.last_mtime
+    assert initial_mtime is not None
+
+    # 1. Corrompe o settings.json com JSON malformado
+    settings_path.write_text("{\ninvalid_json: [", encoding="utf-8")
+    _touch_settings_file(watcher)
+    corrupted_mtime = os.path.getmtime(watcher.settings_path)
+
+    # Executa a verificação
+    await watcher._check_config_file()
+
+    # Confirma que last_mtime foi atualizado para evitar loop infinito a cada 500ms
+    assert watcher.last_mtime == corrupted_mtime
+
+    # Confirma que nenhuma alteração foi propagada aos componentes
+    on_ws_change.assert_not_awaited()
+    assert watcher.last_websocket_port == 8974
+    mock_hotkeys.setup.assert_not_called()
+
+    # Executa novamente sem alterar o arquivo: deve ser no-op
+    await watcher._check_config_file()
+    on_ws_change.assert_not_awaited()
+
+    # 2. Corrige o arquivo com novo websocket_port e log_level
+    valid_new_json = json.dumps({"websocket_port": 9300, "log_level": "DEBUG"})
+    settings_path.write_text(valid_new_json, encoding="utf-8")
+    _touch_settings_file(watcher)
+
+    # Executa a verificação
+    await watcher._check_config_file()
+
+    # Confirma que recuperou e aplicou a nova configuração
+    on_ws_change.assert_awaited_once_with(9300)
+    assert watcher.last_websocket_port == 9300
+    assert watcher.last_log_level == "DEBUG"
+    assert real_config_manager.config.websocket_port == 9300

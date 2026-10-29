@@ -526,3 +526,173 @@ def test_ui_settings_consumer_handles_save_failure_and_success(
     assert status_dot.bgcolor == theme.POSITIVE
     # Efeito colateral foi devidamente aplicado com os valores dos controles
     assert sync_calls == [(True, False)]
+
+
+# ==============================================================================
+# EST-02.2A: Testes de Carregamento Seguro e Recuperação de Configurações
+# ==============================================================================
+
+
+def test_load_nonexistent_file_initializes_and_persists_defaults(tmp_path: Path) -> None:
+    """CFG-01: Arquivo inexistente cria e persiste padrões com segurança."""
+    cfg_path = tmp_path / "sub" / "settings.json"
+    assert not cfg_path.exists()
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 5
+    assert mgr.config.websocket_port == 8974
+
+    # Confirma que o arquivo foi realmente criado no disco
+    assert cfg_path.exists()
+    with open(cfg_path, encoding="utf-8") as f:
+        saved_data = json.load(f)
+    assert saved_data["volume_step"] == 5
+    assert saved_data["websocket_port"] == 8974
+
+
+def test_load_valid_existing_file_preserves_values(tmp_path: Path) -> None:
+    """CFG-01: Arquivo existente com JSON válido carrega com sucesso."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(
+        json.dumps({"volume_step": 12, "websocket_port": 9123}),
+        encoding="utf-8",
+    )
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 12
+    assert mgr.config.websocket_port == 9123
+
+
+def test_load_malformed_json_preserves_file_and_memory_without_overwrite(tmp_path: Path) -> None:
+    """CFG-01 e CFG-05: JSON malformado não sobrescreve o arquivo no disco."""
+    cfg_path = tmp_path / "settings.json"
+    malformed_content = '{\n  "volume_step": 12,\n  "unclosed: '
+    cfg_path.write_text(malformed_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is False
+    # Retorna defaults em memória por ser a primeira inicialização
+    assert mgr.config.volume_step == 5
+    assert mgr.config.websocket_port == 8974
+
+    # O arquivo original no disco DEVE permanecer inalterado!
+    assert cfg_path.read_text(encoding="utf-8") == malformed_content
+
+
+@pytest.mark.parametrize(
+    "raw_json",
+    [
+        "[]",
+        "null",
+        '"string"',
+        "123",
+        "true",
+    ],
+)
+def test_load_invalid_root_structures(tmp_path: Path, raw_json: str) -> None:
+    """CFG-03: Estrutura raiz diferente de dict é rejeitada sem sobrescrever o disco."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(raw_json, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is False
+    assert mgr.config.volume_step == 5
+    assert cfg_path.read_text(encoding="utf-8") == raw_json
+
+
+def test_reload_malformed_file_preserves_last_valid_configuration(tmp_path: Path) -> None:
+    """CFG-02: Falha no reload mantém a última configuração válida em memória."""
+    cfg_path = tmp_path / "settings.json"
+    initial_content = json.dumps({"volume_step": 18, "websocket_port": 9500})
+    cfg_path.write_text(initial_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 18
+    assert mgr.config.websocket_port == 9500
+
+    # Corrompe o arquivo no disco
+    corrupted_content = "{ corrupted json : true "
+    cfg_path.write_text(corrupted_content, encoding="utf-8")
+
+    reloaded_cfg = mgr.reload()
+    assert mgr.last_load_succeeded is False
+    # Garante que os valores anteriores válidos em memória foram preservados
+    assert reloaded_cfg.volume_step == 18
+    assert reloaded_cfg.websocket_port == 9500
+    assert mgr.config.volume_step == 18
+    assert mgr.config.websocket_port == 9500
+
+    # Garante que o arquivo corrompido não foi sobrescrito
+    assert cfg_path.read_text(encoding="utf-8") == corrupted_content
+
+
+def test_recovery_after_fixing_malformed_file(tmp_path: Path) -> None:
+    """CFG-02 e CFG-04: Recuperação transparente após o arquivo ser corrigido manualmente."""
+    cfg_path = tmp_path / "settings.json"
+    cfg_path.write_text(json.dumps({"volume_step": 10}), encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 10
+
+    # 1. Arquivo se corrompe
+    cfg_path.write_text("{bad", encoding="utf-8")
+    mgr.reload()
+    assert mgr.last_load_succeeded is False
+    assert mgr.config.volume_step == 10
+
+    # 2. Usuário/processo corrige o arquivo
+    cfg_path.write_text(json.dumps({"volume_step": 20}), encoding="utf-8")
+    recovered_cfg = mgr.reload()
+    assert mgr.last_load_succeeded is True
+    assert recovered_cfg.volume_step == 20
+    assert mgr.config.volume_step == 20
+
+
+def test_load_io_or_permission_error_preserves_state_and_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CFG-05: Erro de I/O (PermissionError / OSError) é tratado sem crash e sem sobrescrita."""
+    cfg_path = tmp_path / "settings.json"
+    valid_content = json.dumps({"volume_step": 14})
+    cfg_path.write_text(valid_content, encoding="utf-8")
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is True
+    assert mgr.config.volume_step == 14
+
+    # Simula PermissionError ao tentar ler o arquivo
+    original_open = open
+
+    def failing_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(file) == str(cfg_path) and ("r" in args or kwargs.get("mode", "r") == "r"):
+            raise PermissionError("Acesso negado simulado")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+
+    cfg = mgr.reload()
+    assert mgr.last_load_succeeded is False
+    assert cfg.volume_step == 14
+    assert mgr.config.volume_step == 14
+
+    # Remove o monkeypatch e verifica integridade do arquivo
+    monkeypatch.undo()
+    assert cfg_path.read_text(encoding="utf-8") == valid_content
+
+
+def test_load_unicode_decode_error_preserves_state_and_file(tmp_path: Path) -> None:
+    """CFG-05: Arquivo com bytes inválidos para UTF-8 é tratado sem sobrescrita."""
+    cfg_path = tmp_path / "settings.json"
+    # Escreve bytes inválidos em UTF-8
+    cfg_path.write_bytes(b'{"key": "\xff\xfe\xfa\x80"}')
+
+    mgr = ConfigManager(config_file=str(cfg_path))
+    assert mgr.last_load_succeeded is False
+    assert mgr.config.volume_step == 5  # default em memória
+
+    # O arquivo em disco NÃO pode ter sido substituído por AppConfig padrão
+    assert cfg_path.read_bytes() == b'{"key": "\xff\xfe\xfa\x80"}'
