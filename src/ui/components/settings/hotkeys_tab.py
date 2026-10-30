@@ -10,13 +10,25 @@ from src.ui import theme
 _PageLike = ft.Page | ft.BasePage
 
 
+@dataclass(frozen=True)
+class SaveOutcome:
+    """Resultado detalhado da persistência e efeitos posteriores na interface."""
+
+    persisted: bool
+    side_effects_ok: bool = True
+
+
 @dataclass
 class _CaptureState:
     field: ft.TextField | None = None
     label: str = ""
 
 
-def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], bool], status_text: ft.Text) -> ft.Control:
+def hotkeys_tab(
+    cfg: AppConfig,
+    on_save: Callable[[], SaveOutcome | bool],
+    status_text: ft.Text,
+) -> ft.Control:
     """Seção Atalhos: captura de combinações de teclado."""
 
     fields: dict[str, ft.TextField] = {}
@@ -50,13 +62,20 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], bool], status_text: ft.Tex
 
         field.value = hotkey
         field.data = True
-        saved = on_save()
-        if saved:
-            status_text.value = f"{label.lower()} salvo: {hotkey}"
-            status_text.color = theme.POSITIVE
-        else:
+        res = on_save()
+
+        persisted = getattr(res, "persisted", res) if not isinstance(res, bool) else res
+        side_effects_ok = (
+            getattr(res, "side_effects_ok", True) if not isinstance(res, bool) else res
+        )
+
+        if not persisted:
             field.value = prev_value
             field.data = prev_data
+        else:
+            if side_effects_ok:
+                status_text.value = f"{label.lower()} salvo: {hotkey}"
+                status_text.color = theme.POSITIVE
 
         stop_capture(e.page)
 
@@ -75,13 +94,20 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], bool], status_text: ft.Tex
 
         field.value = ""
         field.data = True
-        saved = on_save()
-        if saved:
-            status_text.value = f"{label.lower()} limpo"
-            status_text.color = theme.DIM
-        else:
+        res = on_save()
+
+        persisted = getattr(res, "persisted", res) if not isinstance(res, bool) else res
+        side_effects_ok = (
+            getattr(res, "side_effects_ok", True) if not isinstance(res, bool) else res
+        )
+
+        if not persisted:
             field.value = prev_value
             field.data = prev_data
+        else:
+            if side_effects_ok:
+                status_text.value = f"{label.lower()} limpo"
+                status_text.color = theme.DIM
 
         page.update()
 

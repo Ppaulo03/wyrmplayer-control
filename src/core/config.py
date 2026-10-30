@@ -470,12 +470,14 @@ class ConfigManager:
         concorrentes não produzam divergência entre memória e disco.
 
         Preservação de identidade:
-            Quando invocado sem argumentos (save()), a identidade da instância
-            gerenciada em self.config é preservada, garantindo compatibilidade com
-            consumidores que mantêm referências obtidas via get_all(). Quaisquer
-            campos normalizados (ex.: log_level em maiúsculas) são sincronizados
-            na instância existente somente após a substituição atômica confirmada.
-            Quando invocado com uma nova configuração explícita (save(new_config)),
+            Quando invocado sem argumentos (save()) ou quando o argumento fornecido
+            for a própria instância atualmente gerenciada (save(self.config) ou
+            save(get_all())), a identidade da instância gerenciada em self.config
+            é preservada. Consumidores que mantêm referências prévias continuam com
+            o mesmo objeto ativo. Quaisquer campos normalizados (ex.: log_level em
+            maiúsculas) são sincronizados na instância existente somente após a
+            substituição atômica confirmada no disco.
+            Quando invocado com uma nova configuração independente (save(new_config)),
             a referência gerenciada é intencionalmente substituída pela nova
             instância validada.
 
@@ -562,11 +564,10 @@ class ConfigManager:
                 temp_path = None
 
                 # Atualiza o estado em memória apenas após o sucesso confirmado em disco
-                if config is not None:
-                    self.config = validated_config
-                else:
+                current_config = getattr(self, "config", None)
+                if current_config is not None and (config is None or config is current_config):
                     # Preserva a identidade da instância gerenciada em self.config
-                    # para consumidores que mantêm referências (ex.: get_all()),
+                    # para referências mantidas por consumidores (ex.: get_all() ou save(cfg)),
                     # sincronizando os valores validados e normalizados.
                     for cfg_field in fields(AppConfig):
                         val = getattr(validated_config, cfg_field.name)
@@ -580,6 +581,8 @@ class ConfigManager:
                             self.config.triggers.update(val)
                         else:
                             setattr(self.config, cfg_field.name, val)
+                else:
+                    self.config = validated_config
 
                 logger.info("Configurações salvas em %s", self.config_path)
                 return True

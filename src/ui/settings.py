@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -10,9 +11,11 @@ from src.core.config import AppConfig, ConfigManager
 from src.ui import theme
 from src.ui.components.settings.advanced_tab import advanced_tab
 from src.ui.components.settings.general_tab import general_tab
-from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+from src.ui.components.settings.hotkeys_tab import SaveOutcome, hotkeys_tab
 from src.ui.components.settings.integrations_tab import integrations_tab
 from src.ui.components.settings.layout_tab import layout_tab
+
+logger = logging.getLogger(__name__)
 
 _SECTIONS = [
     ("geral", "Geral"),
@@ -27,6 +30,14 @@ _SECTIONS = [
 WINDOW_TITLE = "Configurações - WyrmPlayer Control"
 
 
+_last_save_outcome: SaveOutcome = SaveOutcome(persisted=False, side_effects_ok=True)
+
+
+def get_last_save_outcome() -> SaveOutcome:
+    """Retorna o resultado mais recente de persistência e efeitos colaterais."""
+    return _last_save_outcome
+
+
 def save_settings_from_controls(
     config_manager: ConfigManager,
     tab_gen: Any,
@@ -37,8 +48,10 @@ def save_settings_from_controls(
     status_text: ft.Text,
     status_dot: ft.Container,
     page: ft.Page | None = None,
+    outcome_holder: list[SaveOutcome] | None = None,
 ) -> bool:
     """Coleta os valores das seções da UI, salva as configurações e atualiza status."""
+    global _last_save_outcome
     try:
         g_data = getattr(tab_gen, "data", {})
         h_data = getattr(tab_hot, "data", {})
@@ -77,14 +90,34 @@ def save_settings_from_controls(
             status_text.value = "erro ao salvar configurações"
             status_text.color = theme.DANGER
             status_dot.bgcolor = theme.DANGER
+            _last_save_outcome = SaveOutcome(persisted=False, side_effects_ok=False)
+            if outcome_holder is not None:
+                outcome_holder.append(_last_save_outcome)
             if page:
                 page.update()
             return False
 
-        autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
-        status_text.value = "salvamento automático ativo"
-        status_text.color = theme.POSITIVE
-        status_dot.bgcolor = theme.POSITIVE
+        # Persistência confirmada com sucesso em disco
+        autostart_ok = True
+        try:
+            autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
+        except Exception as e:
+            autostart_ok = False
+            logger.warning("Configurações salvas, mas falha ao sincronizar autostart: %s", e)
+
+        if autostart_ok:
+            status_text.value = "salvamento automático ativo"
+            status_text.color = theme.POSITIVE
+            status_dot.bgcolor = theme.POSITIVE
+        else:
+            status_text.value = "salvo (falha ao sincronizar autostart)"
+            status_text.color = theme.ACCENT
+            status_dot.bgcolor = theme.ACCENT
+
+        _last_save_outcome = SaveOutcome(persisted=True, side_effects_ok=autostart_ok)
+        if outcome_holder is not None:
+            outcome_holder.append(_last_save_outcome)
+
         if page:
             page.update()
         return True
@@ -92,6 +125,9 @@ def save_settings_from_controls(
         status_text.value = f"erro ao salvar: {e}"
         status_text.color = theme.DANGER
         status_dot.bgcolor = theme.DANGER
+        _last_save_outcome = SaveOutcome(persisted=False, side_effects_ok=False)
+        if outcome_holder is not None:
+            outcome_holder.append(_last_save_outcome)
         if page:
             page.update()
         return False
@@ -170,8 +206,9 @@ async def main(page: ft.Page) -> None:
     # --- Instanciação das seções ---
     tab_gen = general_tab(cfg, on_ui_change)
 
-    def on_hotkeys_save() -> bool:
-        return save_settings()
+    def on_hotkeys_save() -> SaveOutcome:
+        save_settings()
+        return get_last_save_outcome()
 
     tab_hot = hotkeys_tab(cfg, on_hotkeys_save, status_text)
     tab_lay = layout_tab(cfg, on_ui_change)
