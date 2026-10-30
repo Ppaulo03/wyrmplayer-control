@@ -30,6 +30,8 @@ class WebSocketManager:
         self._is_shutting_down: bool = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._cleanup_server: MusicWebSocketServer | None = None
+        self._cleanup_server_task: asyncio.Task[None] | None = None
 
     @property
     def server(self) -> MusicWebSocketServer | None:
@@ -89,10 +91,38 @@ class WebSocketManager:
         server: MusicWebSocketServer | None,
         task: asyncio.Task[None] | None,
     ) -> asyncio.Task[None]:
-        """Agenda e supervisiona o cleanup de uma geração de servidor."""
+        """Agenda e supervisiona o cleanup de uma geração de servidor de forma idempotente."""
+        if self._cleanup_task is not None:
+            if self._cleanup_server is server and self._cleanup_server_task is task:
+                return self._cleanup_task
+            if not self._cleanup_task.done():
+                prev_task = self._cleanup_task
+                cleanup_task = asyncio.create_task(
+                    self._run_chained_cleanup(prev_task, server, task)
+                )
+                self._cleanup_task = cleanup_task
+                self._cleanup_server = server
+                self._cleanup_server_task = task
+                return cleanup_task
+
         cleanup_task = asyncio.create_task(self._run_supervised_cleanup(server, task))
         self._cleanup_task = cleanup_task
+        self._cleanup_server = server
+        self._cleanup_server_task = task
         return cleanup_task
+
+    async def _run_chained_cleanup(
+        self,
+        prev_task: asyncio.Task[None],
+        server: MusicWebSocketServer | None,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        """Aguarda a tarefa de cleanup anterior antes de executar o cleanup da nova geração."""
+        try:
+            await asyncio.shield(prev_task)
+        except Exception as e:
+            logger.warning("Falha ao aguardar cleanup de geração anterior: %s", e)
+        await self._run_supervised_cleanup(server, task)
 
     async def _run_supervised_cleanup(
         self,
@@ -106,14 +136,13 @@ class WebSocketManager:
         except Exception as e:
             cleanup_failed = True
             logger.error("Falha crítica durante cleanup do servidor WebSocket: %s", e)
+            raise
         finally:
             if not cleanup_failed:
                 if self._server is server:
                     self._server = None
                 if self._server_task is task:
                     self._server_task = None
-            if self._cleanup_task is asyncio.current_task():
-                self._cleanup_task = None
 
     async def start(self) -> bool:
         """Inicia o servidor WebSocket na porta inicial configurada."""
@@ -287,7 +316,11 @@ class WebSocketManager:
             self._server_task = None
 
             if server is not None or task is not None:
-                await self._cleanup_server_instance(server, task)
+                cleanup_task = self._schedule_cleanup(server, task)
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    raise
 
     async def stop(self) -> None:
         """Encerra definitivamente o WebSocketManager e todos os recursos supervisionados."""

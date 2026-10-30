@@ -2163,3 +2163,397 @@ async def test_websocket_manager_observer_timeout_during_cleanup_preserves_super
     finally:
         unblock_cleanup.set()
         await manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# EST-03.2.3: Idempotência do Cleanup e Preservação da Supervisão
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_schedule_cleanup_is_idempotent(
+    app_state: AppState,
+) -> None:
+    """EST-03.2.3 - Teste 1: Agendamento idempotente de cleanup para mesma geração."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+    server_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(10))
+
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+    orig_stop = server.stop
+
+    async def slow_stop() -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_stop()
+
+    server.stop = slow_stop  # type: ignore[assignment]
+
+    try:
+        # Primeiro agendamento de cleanup
+        task1 = manager._schedule_cleanup(server, server_task)
+        await cleanup_started.wait()
+
+        # Segundo agendamento para os mesmos recursos (mesma geração)
+        task2 = manager._schedule_cleanup(server, server_task)
+
+        # Deve reutilizar exatamente a mesma tarefa supervisionada
+        assert task1 is task2
+        assert manager._cleanup_task is task1
+        assert manager.is_cleaning_up is True
+
+        # Liberar a conclusão do cleanup
+        unblock_cleanup.set()
+        await task1
+
+        # Referências limpas após conclusão
+        assert manager.is_cleaning_up is False
+        assert server_task.done()
+
+    finally:
+        unblock_cleanup.set()
+        if not server_task.done():
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_bind_failure_observer_cancellation_preserves_cleanup_and_barrier(
+    app_state: AppState,
+) -> None:
+    """EST-03.2.3 - Teste 2: Falha de bind seguida de cancelamento preserva cleanup e barreira."""
+    # Ocupa uma porta para forçar falha no bind (OSError)
+    sock_block: socket.socket | None = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_block.bind(("127.0.0.1", 0))
+    port_occ = sock_block.getsockname()[1]
+
+    manager = WebSocketManager(app_state, initial_port=port_occ)
+
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+    orig_cleanup_server = manager._cleanup_server_instance
+
+    async def slow_cleanup(
+        server: MusicWebSocketServer | None,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_cleanup_server(server, task)
+
+    manager._cleanup_server_instance = slow_cleanup  # type: ignore[assignment]
+
+    try:
+        # 1. Iniciar manager.start() com falha de bind
+        start_task = asyncio.create_task(manager.start())
+        await cleanup_started.wait()
+
+        # O cleanup original foi agendado e está pendente
+        orig_cleanup_task = manager._cleanup_task
+        assert orig_cleanup_task is not None
+        assert not orig_cleanup_task.done()
+
+        # 5. Cancelar a tarefa observadora de manager.start()
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        # 7. Confirmar que não foi criada segunda tarefa independente
+        assert manager._cleanup_task is orig_cleanup_task
+        assert manager.is_cleaning_up is True
+
+        # 10. Solicitar nova inicialização enquanto cleanup está pendente
+        # Libera a porta antes para permitir que a nova inicialização funcione
+        sock_block.close()
+        sock_block = None
+
+        start_task2 = asyncio.create_task(manager.start())
+        await asyncio.sleep(0.01)
+
+        # 11. Confirmar que ela não ultrapassou o cleanup pendente (aguarda na barreira)
+        assert not start_task2.done()
+        assert manager.is_running is False
+
+        # 12. Liberar o cleanup original
+        unblock_cleanup.set()
+
+        # 14. Nova inicialização prossegue e tem sucesso
+        res = await asyncio.wait_for(start_task2, timeout=2.0)
+        assert res is True
+        assert manager.is_running is True
+        assert manager.listening_port == port_occ
+
+        # 15. Encerrar o gerenciador
+        await manager.stop()
+        assert manager.is_running is False
+        assert manager.is_cleaning_up is False
+
+    finally:
+        if sock_block is not None:
+            sock_block.close()
+        unblock_cleanup.set()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_bind_failure_cancellation_state_integrity(
+    app_state: AppState,
+) -> None:
+    """EST-03.2.3 - Teste 3: Integridade dos estados e atributos após cancelamento do observador."""
+    sock_block = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_block.bind(("127.0.0.1", 0))
+    port_occ = sock_block.getsockname()[1]
+
+    manager = WebSocketManager(app_state, initial_port=port_occ)
+
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+    orig_cleanup_server = manager._cleanup_server_instance
+
+    async def slow_cleanup(
+        server: MusicWebSocketServer | None,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_cleanup_server(server, task)
+
+    manager._cleanup_server_instance = slow_cleanup  # type: ignore[assignment]
+
+    try:
+        start_task = asyncio.create_task(manager.start())
+        await cleanup_started.wait()
+
+        orig_cleanup_task = manager._cleanup_task
+        failed_server = manager._server
+        failed_server_task = manager._server_task
+
+        # Cancelar observador
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        # Inspecionar atributos durante o cleanup pendente
+        assert manager._cleanup_task is orig_cleanup_task
+        assert manager._server is failed_server
+        assert manager._server_task is failed_server_task
+        assert manager.is_cleaning_up is True
+        assert manager.is_running is False
+        assert manager.current_port == port_occ
+
+        # Liberar cleanup
+        unblock_cleanup.set()
+        if orig_cleanup_task is not None:
+            await orig_cleanup_task
+
+        # Atributos restaurados com segurança
+        assert manager._server is None
+        assert manager._server_task is None
+        assert manager.is_cleaning_up is False
+        assert manager.is_running is False
+
+    finally:
+        sock_block.close()
+        unblock_cleanup.set()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_shutdown_during_bind_observer_cancellation_deduplicates_cleanup(
+    app_state: AppState,
+) -> None:
+    """EST-03.2.3 - Teste 4: Shutdown com cleanup agendado não duplica tarefas ao cancelar."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    orig_serve = websockets.serve
+
+    bind_started = asyncio.Event()
+    unblock_bind = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+
+    async def slow_serve(*args: Any, **kwargs: Any) -> Server:
+        bind_started.set()
+        try:
+            await unblock_bind.wait()
+        except asyncio.CancelledError:
+            await unblock_bind.wait()
+            raise
+        return await orig_serve(*args, **kwargs)
+
+    orig_cleanup_server = manager._cleanup_server_instance
+
+    async def slow_cleanup(
+        server: MusicWebSocketServer | None,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_cleanup_server(server, task)
+
+    websockets.serve = slow_serve  # type: ignore[assignment]
+    manager._cleanup_server_instance = slow_cleanup  # type: ignore[assignment]
+
+    try:
+        # 1. Iniciar manager.start() com bind retido
+        start_task = asyncio.create_task(manager.start())
+        await bind_started.wait()
+
+        # 3. Solicitar manager.stop()
+        stop_task = asyncio.create_task(manager.stop())
+        await asyncio.sleep(0.01)
+
+        # 4. Intenção de shutdown registrada
+        assert manager.is_shutting_down is True
+
+        # 6. Startup percebe o shutdown e agenda cleanup
+        await cleanup_started.wait()
+        orig_cleanup_task = manager._cleanup_task
+        assert orig_cleanup_task is not None
+
+        # 8. Cancelar o observador de manager.start()
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        # 9. Nenhuma segunda tarefa independente foi criada
+        assert manager._cleanup_task is orig_cleanup_task
+
+        # 10 & 11. O shutdown continua supervisionado e ainda não concluiu
+        assert manager.is_cleaning_up is True
+        assert not stop_task.done()
+
+        # 12. Liberar bind e cleanup
+        unblock_bind.set()
+        unblock_cleanup.set()
+
+        # 13. Conclusão ordenada de manager.stop()
+        await asyncio.wait_for(stop_task, timeout=2.0)
+
+        # 14. Ausência de sockets ou tarefas residuais
+        assert manager.is_running is False
+        assert manager.server is None
+        assert manager.is_cleaning_up is False
+
+    finally:
+        unblock_bind.set()
+        unblock_cleanup.set()
+        websockets.serve = orig_serve  # type: ignore[assignment]
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_barrier_active_during_pending_cleanup_deduplicated(
+    app_state: AppState,
+) -> None:
+    """EST-03.2.3 - Teste 5: Barreira permanece ativa e deduplica chamadas repetidas de cleanup."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+    server_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(10))
+
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+    orig_cleanup_server = manager._cleanup_server_instance
+
+    async def slow_cleanup(
+        srv: MusicWebSocketServer | None,
+        tsk: asyncio.Task[None] | None,
+    ) -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_cleanup_server(srv, tsk)
+
+    manager._cleanup_server_instance = slow_cleanup  # type: ignore[assignment]
+
+    try:
+        task1 = manager._schedule_cleanup(server, server_task)
+        await cleanup_started.wait()
+
+        # Chamadas repetidas retornam a mesma tarefa original
+        task2 = manager._schedule_cleanup(server, server_task)
+        task3 = manager._schedule_cleanup(server, server_task)
+        assert task1 is task2 is task3
+        assert manager._cleanup_task is task1
+        assert manager.is_cleaning_up is True
+
+        # Nova inicialização não pode ultrapassar a barreira
+        start_task = asyncio.create_task(manager.start())
+        await asyncio.sleep(0.01)
+        assert not start_task.done()
+
+        # Liberar o cleanup
+        unblock_cleanup.set()
+        await task1
+
+        # Barreira liberada permite que a inicialização complete
+        res = await asyncio.wait_for(start_task, timeout=2.0)
+        assert res is True
+        assert manager.is_running is True
+
+    finally:
+        unblock_cleanup.set()
+        if not server_task.done():
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_repeated_stop_deduplicates_and_preserves_supervision(
+    app_state: AppState,
+) -> None:
+    """EST-03.2.3 - Teste 6: Chamadas concorrentes e repetidas a stop() não duplicam cleanup."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    started = await manager.start()
+    assert started is True
+    assert manager.is_running is True
+
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+    orig_cleanup_server = manager._cleanup_server_instance
+
+    async def slow_cleanup(
+        srv: MusicWebSocketServer | None,
+        tsk: asyncio.Task[None] | None,
+    ) -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_cleanup_server(srv, tsk)
+
+    manager._cleanup_server_instance = slow_cleanup  # type: ignore[assignment]
+
+    try:
+        # Dispara stop() concorrente e repetido
+        stop_task1 = asyncio.create_task(manager.stop())
+        await cleanup_started.wait()
+
+        stop_task2 = asyncio.create_task(manager.stop())
+        stop_task3 = asyncio.create_task(manager.stop())
+
+        orig_cleanup = manager._cleanup_task
+        assert orig_cleanup is not None
+        assert manager.is_cleaning_up is True
+
+        # Libera o cleanup
+        unblock_cleanup.set()
+
+        # Todos devem concluir sem criar tarefas duplicadas ou deadlock
+        await asyncio.wait_for(
+            asyncio.gather(stop_task1, stop_task2, stop_task3),
+            timeout=2.0,
+        )
+
+        assert manager.is_running is False
+        assert manager.server is None
+        assert manager.is_cleaning_up is False
+
+    finally:
+        unblock_cleanup.set()
+        await manager.stop()
