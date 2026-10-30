@@ -79,14 +79,20 @@ async def app_main(page: ft.Page) -> None:
         nonlocal server, server_task
 
         logger.info("Reiniciando servidor WebSocket na porta %s...", new_port)
-        if server_task is not None:
+        if server is not None:
+            try:
+                await server.stop()
+            except Exception as e:
+                logger.warning("Falha ao encerrar WebSocket anterior: %s", e)
+
+        if server_task is not None and not server_task.done():
             server_task.cancel()
             try:
                 await server_task
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.warning("Falha ao encerrar WebSocket anterior: %s", e)
+                logger.warning("Falha ao aguardar tarefa de WebSocket anterior: %s", e)
 
         server = MusicWebSocketServer(state, port=new_port)
         controller.set_messenger(server)
@@ -147,6 +153,13 @@ async def app_main(page: ft.Page) -> None:
     except Exception as e:
         logger.error(f"Erro inesperado no loop principal: {e}")
     finally:
+        # Encerramento gracioso do WebSocket
+        if server is not None:
+            try:
+                await server.stop()
+            except Exception as e:
+                logger.warning("Falha ao encerrar servidor WebSocket no desligamento: %s", e)
+
         # Cancelamento das tarefas em background
         for task in [server_task, config_watch_task, spotify_check_task]:
             if task and not task.done():
