@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -455,6 +455,12 @@ class ConfigManager:
     def save(self, config: AppConfig | None = None) -> bool:
         """Salva o estado das configurações no arquivo JSON de forma atômica e thread-safe.
 
+        Antes de qualquer operação em disco, valida os tipos, intervalos e estruturas
+        da configuração candidata através de _validate_and_build_config. Caso a validação
+        falhe, a persistência é abortada imediatamente, retornando False, sem criar
+        arquivos temporários, sem alterar o arquivo original em disco e sem modificar
+        o estado confirmado em self.config.
+
         Garante persistência atômica através da escrita em arquivo temporário no
         mesmo sistema de arquivos, seguida de flush, fsync e substituição via
         os.replace. Em caso de falha de gravação ou serialização, o arquivo
@@ -463,23 +469,73 @@ class ConfigManager:
         A operação completa é protegida por self._lock, garantindo que salvamentos
         concorrentes não produzam divergência entre memória e disco.
 
+        Preservação de identidade:
+            Quando invocado sem argumentos (save()) ou quando o argumento fornecido
+            for a própria instância atualmente gerenciada (save(self.config) ou
+            save(get_all())), a identidade da instância gerenciada em self.config
+            é preservada. Consumidores que mantêm referências prévias continuam com
+            o mesmo objeto ativo. Quaisquer campos normalizados (ex.: log_level em
+            maiúsculas) são sincronizados na instância existente somente após a
+            substituição atômica confirmada no disco.
+            Quando invocado com uma nova configuração independente (save(new_config)),
+            a referência gerenciada é intencionalmente substituída pela nova
+            instância validada.
+
         Limitações:
-            Se o chamador mutar diretamente atributos da instância compartilhada
-            em self.config (ex.: config_manager.config.volume_step = 10) antes de
-            invocar save(), tais alterações já residem no objeto em memória. Para
-            garantir isolamento estrito entre memória e disco em caso de falha,
-            recomenda-se passar uma nova instância para save(new_config).
+            1. Mutação de estado compartilhado:
+               Se o chamador mutar diretamente atributos da instância compartilhada
+               em self.config (ex.: config_manager.config.volume_step = -10) antes de
+               invocar save(), tais alterações já residem no objeto em memória. Caso
+               a validação rejeite os novos valores, o arquivo em disco permanece
+               inalterado, mas o objeto em memória terá os valores mutados. Para
+               garantir isolamento estrito entre memória e disco, recomenda-se
+               instanciar uma nova configuração candidata e passar para save(new_config).
+            2. Campos desconhecidos:
+               AppConfig define estritamente os campos conhecidos da aplicação. Campos
+               não reconhecidos presentes no arquivo original são ignorados durante
+               o carregamento e serão descartados caso o arquivo seja regravado por
+               save(), preservando o schema estrito da aplicação (decisão formal de
+               compatibilidade do Planner).
 
         Returns:
-            bool: True se a persistência e atualização foram bem-sucedidas;
-                  False caso tenha ocorrido qualquer erro de serialização,
+            bool: True se a validação, persistência e atualização foram bem-sucedidas;
+                  False caso tenha ocorrido qualquer erro de validação, serialização,
                   criação de diretório, escrita ou substituição.
         """
         with self._lock:
             target_config = config if config is not None else self.config
 
+            if not isinstance(target_config, AppConfig):
+                logger.error(
+                    "Tentativa de salvar configuração de tipo inválido em %s: "
+                    "esperava AppConfig, obtido %s.",
+                    self.config_path,
+                    type(target_config).__name__,
+                )
+                return False
+
             try:
-                payload = json.dumps(asdict(target_config), indent=4, ensure_ascii=False)
+                raw_data = asdict(target_config)
+                validated_config = _validate_and_build_config(raw_data)
+            except ConfigValidationError as err:
+                logger.error(
+                    "Configuração com valores ou tipos inválidos rejeitada antes de salvar em %s: "
+                    "%s. O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return False
+            except Exception as err:
+                logger.error(
+                    "Erro inesperado ao validar configurações antes de salvar em %s: %s. "
+                    "O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return False
+
+            try:
+                payload = json.dumps(asdict(validated_config), indent=4, ensure_ascii=False)
             except Exception as e:
                 logger.error("Erro ao serializar configurações para JSON: %s", e)
                 return False
@@ -508,8 +564,25 @@ class ConfigManager:
                 temp_path = None
 
                 # Atualiza o estado em memória apenas após o sucesso confirmado em disco
-                if config is not None:
-                    self.config = config
+                current_config = getattr(self, "config", None)
+                if current_config is not None and (config is None or config is current_config):
+                    # Preserva a identidade da instância gerenciada em self.config
+                    # para referências mantidas por consumidores (ex.: get_all() ou save(cfg)),
+                    # sincronizando os valores validados e normalizados.
+                    for cfg_field in fields(AppConfig):
+                        val = getattr(validated_config, cfg_field.name)
+                        if cfg_field.name == "hotkeys" and isinstance(self.config.hotkeys, dict):
+                            self.config.hotkeys.clear()
+                            self.config.hotkeys.update(val)
+                        elif cfg_field.name == "triggers" and isinstance(
+                            self.config.triggers, dict
+                        ):
+                            self.config.triggers.clear()
+                            self.config.triggers.update(val)
+                        else:
+                            setattr(self.config, cfg_field.name, val)
+                else:
+                    self.config = validated_config
 
                 logger.info("Configurações salvas em %s", self.config_path)
                 return True

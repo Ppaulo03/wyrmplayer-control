@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -7,7 +8,17 @@ from src.core.config import AppConfig
 from src.core.utils.keyboard import hotkey_from_event
 from src.ui import theme
 
+logger = logging.getLogger(__name__)
+
 _PageLike = ft.Page | ft.BasePage
+
+
+@dataclass(frozen=True)
+class SaveOutcome:
+    """Resultado detalhado da persistência e efeitos posteriores na interface."""
+
+    persisted: bool
+    side_effects_ok: bool = True
 
 
 @dataclass
@@ -16,7 +27,11 @@ class _CaptureState:
     label: str = ""
 
 
-def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Text) -> ft.Control:
+def hotkeys_tab(
+    cfg: AppConfig,
+    on_save: Callable[[], SaveOutcome | bool],
+    status_text: ft.Text,
+) -> ft.Control:
     """Seção Atalhos: captura de combinações de teclado."""
 
     fields: dict[str, ft.TextField] = {}
@@ -27,7 +42,10 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
         capturing.label = ""
         if isinstance(page, ft.Page):
             page.on_keyboard_event = None
-        page.update()
+        try:
+            page.update()
+        except Exception as exc:
+            logger.warning("Falha ao atualizar interface após captura de atalho: %s", exc)
 
     def on_capture_key(e: ft.KeyboardEvent) -> None:
         field = capturing.field
@@ -45,10 +63,26 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
             stop_capture(e.page)
             return
 
+        prev_value = field.value
+        prev_data = field.data
+
         field.value = hotkey
-        on_save()
-        status_text.value = f"{label.lower()} salvo: {hotkey}"
-        status_text.color = theme.POSITIVE
+        field.data = True
+        res = on_save()
+
+        persisted = getattr(res, "persisted", res) if not isinstance(res, bool) else res
+        side_effects_ok = (
+            getattr(res, "side_effects_ok", True) if not isinstance(res, bool) else res
+        )
+
+        if not persisted:
+            field.value = prev_value
+            field.data = prev_data
+        else:
+            if side_effects_ok:
+                status_text.value = f"{label.lower()} salvo: {hotkey}"
+                status_text.color = theme.POSITIVE
+
         stop_capture(e.page)
 
     def start_capture(field: ft.TextField, label: str, page: _PageLike) -> None:
@@ -58,18 +92,42 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
         status_text.color = theme.ACCENT
         if isinstance(page, ft.Page):
             page.on_keyboard_event = on_capture_key
-        page.update()
+        try:
+            page.update()
+        except Exception as exc:
+            logger.warning("Falha ao atualizar interface ao iniciar captura: %s", exc)
 
     def on_clear(label: str, field: ft.TextField, page: _PageLike) -> None:
+        prev_value = field.value
+        prev_data = field.data
+
         field.value = ""
-        on_save()
-        status_text.value = f"{label.lower()} limpo"
-        status_text.color = theme.DIM
-        page.update()
+        field.data = True
+        res = on_save()
+
+        persisted = getattr(res, "persisted", res) if not isinstance(res, bool) else res
+        side_effects_ok = (
+            getattr(res, "side_effects_ok", True) if not isinstance(res, bool) else res
+        )
+
+        if not persisted:
+            field.value = prev_value
+            field.data = prev_data
+        else:
+            if side_effects_ok:
+                status_text.value = f"{label.lower()} limpo"
+                status_text.color = theme.DIM
+
+        try:
+            page.update()
+        except Exception as exc:
+            logger.warning("Falha ao atualizar interface após limpeza de atalho: %s", exc)
 
     def hotkey_row(label: str, key: str) -> ft.Control:
+        is_configured = key in cfg.hotkeys
         field = ft.TextField(
             value=cfg.hotkeys.get(key, ""),
+            data=is_configured,
             border=ft.InputBorder.NONE,
             bgcolor=theme.PLATE_1,
             color=theme.ACCENT,
