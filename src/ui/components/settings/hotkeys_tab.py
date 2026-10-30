@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -6,6 +7,8 @@ import flet as ft
 from src.core.config import AppConfig
 from src.core.utils.keyboard import hotkey_from_event
 from src.ui import theme
+
+logger = logging.getLogger(__name__)
 
 _PageLike = ft.Page | ft.BasePage
 
@@ -39,7 +42,10 @@ def hotkeys_tab(
         capturing.label = ""
         if isinstance(page, ft.Page):
             page.on_keyboard_event = None
-        page.update()
+        try:
+            page.update()
+        except Exception as exc:
+            logger.warning("Falha ao atualizar interface após captura de atalho: %s", exc)
 
     def on_capture_key(e: ft.KeyboardEvent) -> None:
         field = capturing.field
@@ -86,7 +92,10 @@ def hotkeys_tab(
         status_text.color = theme.ACCENT
         if isinstance(page, ft.Page):
             page.on_keyboard_event = on_capture_key
-        page.update()
+        try:
+            page.update()
+        except Exception as exc:
+            logger.warning("Falha ao atualizar interface ao iniciar captura: %s", exc)
 
     def on_clear(label: str, field: ft.TextField, page: _PageLike) -> None:
         prev_value = field.value
@@ -109,7 +118,10 @@ def hotkeys_tab(
                 status_text.value = f"{label.lower()} limpo"
                 status_text.color = theme.DIM
 
-        page.update()
+        try:
+            page.update()
+        except Exception as exc:
+            logger.warning("Falha ao atualizar interface após limpeza de atalho: %s", exc)
 
     def hotkey_row(label: str, key: str) -> ft.Control:
         is_configured = key in cfg.hotkeys

@@ -30,12 +30,13 @@ _SECTIONS = [
 WINDOW_TITLE = "Configurações - WyrmPlayer Control"
 
 
-_last_save_outcome: SaveOutcome = SaveOutcome(persisted=False, side_effects_ok=True)
-
-
-def get_last_save_outcome() -> SaveOutcome:
-    """Retorna o resultado mais recente de persistência e efeitos colaterais."""
-    return _last_save_outcome
+def _safe_page_update(page: ft.Page | None) -> None:
+    """Atualiza a página de forma segura contra falhas de renderização."""
+    if page is not None:
+        try:
+            page.update()
+        except Exception as e:
+            logger.warning("Falha ao atualizar interface visual: %s", e)
 
 
 def save_settings_from_controls(
@@ -51,7 +52,6 @@ def save_settings_from_controls(
     outcome_holder: list[SaveOutcome] | None = None,
 ) -> bool:
     """Coleta os valores das seções da UI, salva as configurações e atualiza status."""
-    global _last_save_outcome
     try:
         g_data = getattr(tab_gen, "data", {})
         h_data = getattr(tab_hot, "data", {})
@@ -85,26 +85,53 @@ def save_settings_from_controls(
                 "playback": bool(l_data["playback"].data),
             },
         )
+    except Exception as e:
+        logger.error("Erro ao preparar configurações para salvamento: %s", e)
+        outcome = SaveOutcome(persisted=False, side_effects_ok=False)
+        if outcome_holder is not None:
+            outcome_holder.append(outcome)
+        try:
+            status_text.value = f"erro ao salvar: {e}"
+            status_text.color = theme.DANGER
+            status_dot.bgcolor = theme.DANGER
+            _safe_page_update(page)
+        except Exception as ui_err:
+            logger.warning("Falha ao exibir status de erro de preparação: %s", ui_err)
+        return False
+
+    saved = False
+    try:
         saved = config_manager.save(new_cfg)
-        if not saved:
+    except Exception as e:
+        logger.error("Exceção ao persistir configurações: %s", e)
+        saved = False
+
+    if not saved:
+        outcome = SaveOutcome(persisted=False, side_effects_ok=False)
+        if outcome_holder is not None:
+            outcome_holder.append(outcome)
+        try:
             status_text.value = "erro ao salvar configurações"
             status_text.color = theme.DANGER
             status_dot.bgcolor = theme.DANGER
-            _last_save_outcome = SaveOutcome(persisted=False, side_effects_ok=False)
-            if outcome_holder is not None:
-                outcome_holder.append(_last_save_outcome)
-            if page:
-                page.update()
-            return False
+            _safe_page_update(page)
+        except Exception as ui_err:
+            logger.warning("Falha ao exibir status de erro de persistência: %s", ui_err)
+        return False
 
-        # Persistência confirmada com sucesso em disco
-        autostart_ok = True
-        try:
-            autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
-        except Exception as e:
-            autostart_ok = False
-            logger.warning("Configurações salvas, mas falha ao sincronizar autostart: %s", e)
+    # Persistência confirmada com sucesso em disco
+    autostart_ok = True
+    try:
+        autostart.sync(new_cfg.start_with_windows, elevated=new_cfg.start_with_windows_elevated)
+    except Exception as e:
+        autostart_ok = False
+        logger.warning("Configurações salvas, mas falha ao sincronizar autostart: %s", e)
 
+    outcome = SaveOutcome(persisted=True, side_effects_ok=autostart_ok)
+    if outcome_holder is not None:
+        outcome_holder.append(outcome)
+
+    try:
         if autostart_ok:
             status_text.value = "salvamento automático ativo"
             status_text.color = theme.POSITIVE
@@ -113,24 +140,41 @@ def save_settings_from_controls(
             status_text.value = "salvo (falha ao sincronizar autostart)"
             status_text.color = theme.ACCENT
             status_dot.bgcolor = theme.ACCENT
+        _safe_page_update(page)
+    except Exception as ui_err:
+        logger.warning("Falha ao atualizar status visual de sucesso: %s", ui_err)
 
-        _last_save_outcome = SaveOutcome(persisted=True, side_effects_ok=autostart_ok)
-        if outcome_holder is not None:
-            outcome_holder.append(_last_save_outcome)
+    return True
 
-        if page:
-            page.update()
-        return True
-    except Exception as e:
-        status_text.value = f"erro ao salvar: {e}"
-        status_text.color = theme.DANGER
-        status_dot.bgcolor = theme.DANGER
-        _last_save_outcome = SaveOutcome(persisted=False, side_effects_ok=False)
-        if outcome_holder is not None:
-            outcome_holder.append(_last_save_outcome)
-        if page:
-            page.update()
-        return False
+
+def save_settings_and_get_outcome(
+    config_manager: ConfigManager,
+    tab_gen: Any,
+    tab_hot: Any,
+    tab_lay: Any,
+    tab_int: Any,
+    tab_adv: Any,
+    status_text: ft.Text,
+    status_dot: ft.Container,
+    page: ft.Page | None = None,
+) -> SaveOutcome:
+    """Salva as configurações a partir dos controles e retorna o SaveOutcome da operação."""
+    holder: list[SaveOutcome] = []
+    save_settings_from_controls(
+        config_manager=config_manager,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=page,
+        outcome_holder=holder,
+    )
+    if holder:
+        return holder[0]
+    return SaveOutcome(persisted=False, side_effects_ok=False)
 
 
 async def main(page: ft.Page) -> None:
@@ -186,7 +230,7 @@ async def main(page: ft.Page) -> None:
     status_dot = theme.diamond(5, theme.POSITIVE)
 
     # --- Lógica de Salvamento ---
-    def save_settings() -> bool:
+    def save_settings(holder: list[SaveOutcome] | None = None) -> bool:
         return save_settings_from_controls(
             config_manager,
             tab_gen,
@@ -197,18 +241,28 @@ async def main(page: ft.Page) -> None:
             status_text,
             status_dot,
             page,
+            outcome_holder=holder,
         )
 
     def on_ui_change(e: Any) -> None:
         save_settings()
-        page.update()
+        _safe_page_update(page)
 
     # --- Instanciação das seções ---
     tab_gen = general_tab(cfg, on_ui_change)
 
     def on_hotkeys_save() -> SaveOutcome:
-        save_settings()
-        return get_last_save_outcome()
+        return save_settings_and_get_outcome(
+            config_manager,
+            tab_gen,
+            tab_hot,
+            tab_lay,
+            tab_int,
+            tab_adv,
+            status_text,
+            status_dot,
+            page,
+        )
 
     tab_hot = hotkeys_tab(cfg, on_hotkeys_save, status_text)
     tab_lay = layout_tab(cfg, on_ui_change)

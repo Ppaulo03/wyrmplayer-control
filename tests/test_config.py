@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest
 from src.core import autostart
 from src.core.config import AppConfig, ConfigManager
 from src.ui import theme
-from src.ui.settings import SaveOutcome, get_last_save_outcome, save_settings_from_controls
+from src.ui.settings import SaveOutcome, save_settings_and_get_outcome, save_settings_from_controls
 
 
 def test_config_defaults(config_manager: ConfigManager) -> None:
@@ -2614,7 +2615,7 @@ def test_r02_persistence_failure_triggers_rollback(
     )
 
     def on_hotkeys_save() -> SaveOutcome:
-        save_settings_from_controls(
+        return save_settings_and_get_outcome(
             config_manager=mgr,
             tab_gen=tab_gen,
             tab_hot=tab_hot,
@@ -2625,7 +2626,6 @@ def test_r02_persistence_failure_triggers_rollback(
             status_dot=status_dot,
             page=None,
         )
-        return get_last_save_outcome()
 
     initial_cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
     tab_hot = hotkeys_tab(initial_cfg, on_hotkeys_save, status_text)
@@ -2691,7 +2691,7 @@ def test_r02_persistence_and_autostart_success(
     )
 
     def on_hotkeys_save() -> SaveOutcome:
-        save_settings_from_controls(
+        return save_settings_and_get_outcome(
             config_manager=mgr,
             tab_gen=tab_gen,
             tab_hot=tab_hot,
@@ -2702,7 +2702,6 @@ def test_r02_persistence_and_autostart_success(
             status_dot=status_dot,
             page=None,
         )
-        return get_last_save_outcome()
 
     initial_cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
     tab_hot = hotkeys_tab(initial_cfg, on_hotkeys_save, status_text)
@@ -2769,7 +2768,7 @@ def test_r02_persistence_success_with_autostart_exception_no_rollback(
     )
 
     def on_hotkeys_save() -> SaveOutcome:
-        save_settings_from_controls(
+        return save_settings_and_get_outcome(
             config_manager=mgr,
             tab_gen=tab_gen,
             tab_hot=tab_hot,
@@ -2780,7 +2779,6 @@ def test_r02_persistence_success_with_autostart_exception_no_rollback(
             status_dot=status_dot,
             page=None,
         )
-        return get_last_save_outcome()
 
     initial_cfg = mgr.load()
     tab_hot = hotkeys_tab(initial_cfg, on_hotkeys_save, status_text)
@@ -2859,7 +2857,7 @@ def test_r02_persistence_success_with_autostart_exception_on_clear(
     )
 
     def on_hotkeys_save() -> SaveOutcome:
-        save_settings_from_controls(
+        return save_settings_and_get_outcome(
             config_manager=mgr,
             tab_gen=tab_gen,
             tab_hot=tab_hot,
@@ -2870,7 +2868,6 @@ def test_r02_persistence_success_with_autostart_exception_on_clear(
             status_dot=status_dot,
             page=None,
         )
-        return get_last_save_outcome()
 
     initial_cfg = mgr.load()
     tab_hot = hotkeys_tab(initial_cfg, on_hotkeys_save, status_text)
@@ -3032,3 +3029,781 @@ def test_r02_partial_hotkeys_compatibility_preserved(tmp_path: Path) -> None:
     with open(cfg_file, encoding="utf-8") as f:
         saved_data = json.load(f)
     assert saved_data["hotkeys"] == {"play_pause": "ctrl+p"}
+
+
+# ==============================================================================
+# EST-02.2B.2.3: Isolamento dos Resultados de Salvamento (R01)
+# ==============================================================================
+
+
+def test_r01_single_save_operation_outcome_isolated(tmp_path: Path) -> None:
+    """R01 - Teste 1: Salvamento individual entrega SaveOutcome específico com sucesso."""
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="25"),
+            "hud_display_time": _DummyControl(value="4"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+alt+p", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="top_left"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    outcome = save_settings_and_get_outcome(
+        config_manager=mgr,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=None,
+    )
+
+    assert outcome.persisted is True
+    assert outcome.side_effects_ok is True
+    assert cfg_file.exists()
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["volume_step"] == 25
+    assert disk_data["hotkeys"] == {"play_pause": "ctrl+alt+p"}
+
+
+def test_r01_persistence_failure_returns_isolated_failure_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R01 - Teste 2: Falha real de persistência retorna SaveOutcome isolado com persisted=False."""
+    cfg_file = tmp_path / "settings.json"
+    initial_content = {"volume_step": 10, "hotkeys": {"play_pause": "ctrl+1"}}
+    cfg_file.write_text(json.dumps(initial_content), encoding="utf-8")
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    # Simula falha de gravação no ConfigManager
+    monkeypatch.setattr(mgr, "save", MagicMock(return_value=False))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="30"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+new", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    outcome = save_settings_and_get_outcome(
+        config_manager=mgr,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=None,
+    )
+
+    assert outcome.persisted is False
+    assert outcome.side_effects_ok is False
+    # Arquivo anterior permanece intacto
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["volume_step"] == 10
+    assert disk_data["hotkeys"] == {"play_pause": "ctrl+1"}
+    assert status_text.color == theme.DANGER
+
+
+def test_r01_interleaved_operations_receive_their_own_outcomes(tmp_path: Path) -> None:
+    """R01 - Teste 3: Operações intercaladas recebem seus próprios resultados
+    sem contaminação global."""
+    import threading
+
+    cfg_file_a = tmp_path / "settings_a.json"
+    cfg_file_b = tmp_path / "settings_b.json"
+
+    mgr_a = ConfigManager(config_file=str(cfg_file_a))
+    mgr_b = ConfigManager(config_file=str(cfg_file_b))
+
+    status_text_a = theme.mono("")
+    status_dot_a = theme.diamond(5, theme.POSITIVE)
+
+    status_text_b = theme.mono("")
+    status_dot_b = theme.diamond(5, theme.POSITIVE)
+
+    # Tabs para Operação A (sucesso)
+    tab_gen_a = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="15"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot_a = _DummyTab({"play_pause": _DummyControl(value="ctrl+a", data=True)})
+    tab_lay_a = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int_a = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv_a = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    # Tabs para Operação B (falha na persistência)
+    tab_gen_b = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="20"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot_b = _DummyTab({"play_pause": _DummyControl(value="ctrl+b", data=True)})
+    tab_lay_b = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int_b = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv_b = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    # Intercalação determinística usando sincronização por eventos
+    step_a_started = threading.Event()
+    step_b_finished = threading.Event()
+
+    orig_save_a = mgr_a.save
+
+    def synced_save_a(cfg: AppConfig | None = None) -> bool:
+        step_a_started.set()
+        # Aguarda operação B terminar completamente antes de A concluir
+        step_b_finished.wait(timeout=5.0)
+        return orig_save_a(cfg)
+
+    mgr_a.save = synced_save_a  # type: ignore[assignment]
+    mgr_b.save = MagicMock(return_value=False)  # Operação B falha
+
+    outcome_a: list[SaveOutcome] = []
+    outcome_b: list[SaveOutcome] = []
+
+    def run_op_a() -> None:
+        res = save_settings_and_get_outcome(
+            config_manager=mgr_a,
+            tab_gen=tab_gen_a,
+            tab_hot=tab_hot_a,
+            tab_lay=tab_lay_a,
+            tab_int=tab_int_a,
+            tab_adv=tab_adv_a,
+            status_text=status_text_a,
+            status_dot=status_dot_a,
+            page=None,
+        )
+        outcome_a.append(res)
+
+    def run_op_b() -> None:
+        step_a_started.wait(timeout=5.0)
+        res = save_settings_and_get_outcome(
+            config_manager=mgr_b,
+            tab_gen=tab_gen_b,
+            tab_hot=tab_hot_b,
+            tab_lay=tab_lay_b,
+            tab_int=tab_int_b,
+            tab_adv=tab_adv_b,
+            status_text=status_text_b,
+            status_dot=status_dot_b,
+            page=None,
+        )
+        outcome_b.append(res)
+        step_b_finished.set()
+
+    t_a = threading.Thread(target=run_op_a)
+    t_b = threading.Thread(target=run_op_b)
+
+    t_a.start()
+    t_b.start()
+
+    t_a.join(timeout=6.0)
+    t_b.join(timeout=6.0)
+
+    assert not t_a.is_alive()
+    assert not t_b.is_alive()
+
+    # Operação A iniciou antes, terminou depois, mas recebeu seu próprio resultado de sucesso
+    assert len(outcome_a) == 1
+    assert outcome_a[0].persisted is True
+    assert outcome_a[0].side_effects_ok is True
+
+    # Operação B executou no meio, falhou, e recebeu estritamente seu resultado de falha
+    assert len(outcome_b) == 1
+    assert outcome_b[0].persisted is False
+    assert outcome_b[0].side_effects_ok is False
+
+
+def test_r01_reentrant_save_delivers_correct_outcomes(tmp_path: Path) -> None:
+    """R01 - Teste 4: Chamadas reentrantes entregam seus resultados
+    aos seus respectivos chamadores."""
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="5"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+p", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    inner_outcome: list[SaveOutcome] = []
+    outer_outcome: list[SaveOutcome] = []
+
+    orig_save = mgr.save
+
+    def reentrant_save(cfg: AppConfig | None = None) -> bool:
+        # Quando chamado pela primeira vez, executa uma segunda chamada interna com falha
+        if not inner_outcome:
+            # Chamada interna com falha simulada via monkeypatch temporário
+            mgr.save = MagicMock(return_value=False)
+            res_inner = save_settings_and_get_outcome(
+                config_manager=mgr,
+                tab_gen=tab_gen,
+                tab_hot=tab_hot,
+                tab_lay=tab_lay,
+                tab_int=tab_int,
+                tab_adv=tab_adv,
+                status_text=status_text,
+                status_dot=status_dot,
+                page=None,
+            )
+            inner_outcome.append(res_inner)
+            # Restaura save original para a chamada externa
+            mgr.save = orig_save
+        return orig_save(cfg)
+
+    mgr.save = reentrant_save  # type: ignore[assignment]
+
+    res_outer = save_settings_and_get_outcome(
+        config_manager=mgr,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=None,
+    )
+    outer_outcome.append(res_outer)
+
+    assert len(inner_outcome) == 1
+    assert inner_outcome[0].persisted is False
+
+    assert len(outer_outcome) == 1
+    assert outer_outcome[0].persisted is True
+
+
+# ==============================================================================
+# EST-02.2B.2.3: Preservação de Resultados Após Falhas Visuais (R02)
+# ==============================================================================
+
+
+def test_r02_visual_update_failure_preserves_persisted_outcome_and_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R02 - Teste 1: Falha em page.update() após persistência
+    preserva persisted=True e retorno True."""
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="28"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+alt+k", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    page_mock = MagicMock(spec=ft.Page)
+    page_mock.update.side_effect = RuntimeError("Falha de renderização Flet")
+
+    holder: list[SaveOutcome] = []
+    with caplog.at_level(logging.WARNING):
+        res = save_settings_from_controls(
+            config_manager=mgr,
+            tab_gen=tab_gen,
+            tab_hot=tab_hot,
+            tab_lay=tab_lay,
+            tab_int=tab_int,
+            tab_adv=tab_adv,
+            status_text=status_text,
+            status_dot=status_dot,
+            page=page_mock,
+            outcome_holder=holder,
+        )
+
+    # Retorno booleano da persistência permanece True
+    assert res is True
+    assert len(holder) == 1
+    assert holder[0].persisted is True
+    assert holder[0].side_effects_ok is True
+
+    # O arquivo no disco foi atualizado
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["volume_step"] == 28
+    assert disk_data["hotkeys"] == {"play_pause": "ctrl+alt+k"}
+
+    # Diagnóstico da falha visual foi logado
+    assert any("Falha ao atualizar interface visual" in r.message for r in caplog.records)
+
+
+def test_r02_repeated_visual_update_failure_does_not_loop_or_mask_outcome(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R02 - Teste 2: Falha visual repetida não causa recursão, laço infinito ou mascaramento."""
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    # Força falha de persistência
+    mgr.save = MagicMock(return_value=False)  # type: ignore[assignment]
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="10"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+p", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    page_mock = MagicMock(spec=ft.Page)
+    page_mock.update.side_effect = RuntimeError("Falha visual contínua")
+
+    holder: list[SaveOutcome] = []
+    with caplog.at_level(logging.WARNING):
+        res = save_settings_from_controls(
+            config_manager=mgr,
+            tab_gen=tab_gen,
+            tab_hot=tab_hot,
+            tab_lay=tab_lay,
+            tab_int=tab_int,
+            tab_adv=tab_adv,
+            status_text=status_text,
+            status_dot=status_dot,
+            page=page_mock,
+            outcome_holder=holder,
+        )
+
+    # Retorno permanece False pois a gravação falhou
+    assert res is False
+    assert len(holder) == 1
+    assert holder[0].persisted is False
+
+    # page.update foi chamado de forma controlada sem repetições infinitas
+    assert page_mock.update.call_count == 1
+
+
+def test_r02_hotkey_capture_preserves_state_on_visual_update_failure(tmp_path: Path) -> None:
+    """R02 - Teste 3: Captura real de hotkey preserva novo atalho
+    sem rollback se page.update falhar."""
+    from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="10"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    page_mock = MagicMock(spec=ft.Page)
+
+    def on_hotkeys_save() -> SaveOutcome:
+        return save_settings_and_get_outcome(
+            config_manager=mgr,
+            tab_gen=tab_gen,
+            tab_hot=tab_hot,
+            tab_lay=tab_lay,
+            tab_int=tab_int,
+            tab_adv=tab_adv,
+            status_text=status_text,
+            status_dot=status_dot,
+            page=page_mock,
+        )
+
+    initial_cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
+    tab_hot = hotkeys_tab(initial_cfg, on_hotkeys_save, status_text)
+    fields = getattr(tab_hot, "data", {})
+    pp_field = fields["play_pause"]
+
+    row_container = tab_hot.controls[3]
+    inner_row = row_container.content
+    btn_record = inner_row.controls[2]
+
+    # Inicia captura
+    btn_record.on_click(MagicMock(page=page_mock))
+
+    # A partir daqui, page.update falha
+    page_mock.update.side_effect = RuntimeError("Desconexão visual de renderização")
+
+    key_event = MagicMock(key="m", ctrl=True, shift=True, alt=False, meta=False, page=page_mock)
+    page_mock.on_keyboard_event(key_event)
+
+    # Hotkey foi salva em disco e mantida no controle (sem rollback!)
+    assert pp_field.value == "ctrl+shift+m"
+    assert pp_field.data is True
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["hotkeys"]["play_pause"] == "ctrl+shift+m"
+
+
+def test_r02_hotkey_clear_preserves_state_on_visual_update_failure(tmp_path: Path) -> None:
+    """R02 - Teste 4: Limpeza real de hotkey preserva campo limpo
+    sem rollback se page.update falhar."""
+    from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="10"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    page_mock = MagicMock(spec=ft.Page)
+
+    def on_hotkeys_save() -> SaveOutcome:
+        return save_settings_and_get_outcome(
+            config_manager=mgr,
+            tab_gen=tab_gen,
+            tab_hot=tab_hot,
+            tab_lay=tab_lay,
+            tab_int=tab_int,
+            tab_adv=tab_adv,
+            status_text=status_text,
+            status_dot=status_dot,
+            page=page_mock,
+        )
+
+    initial_cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
+    tab_hot = hotkeys_tab(initial_cfg, on_hotkeys_save, status_text)
+    fields = getattr(tab_hot, "data", {})
+    pp_field = fields["play_pause"]
+
+    row_container = tab_hot.controls[3]
+    inner_row = row_container.content
+    btn_clear = inner_row.controls[3]
+
+    # page.update falha durante a limpeza
+    page_mock.update.side_effect = RuntimeError("Falha de renderização Flet")
+
+    btn_clear.on_click(MagicMock(page=page_mock))
+
+    # Campo permanece desativado/limpo no controle e no disco (sem rollback!)
+    assert pp_field.value == ""
+    assert pp_field.data is True
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["hotkeys"]["play_pause"] == ""
+
+
+def test_r02_persistence_failure_and_visual_failure_retains_failure_outcome(tmp_path: Path) -> None:
+    """R02 - Teste 5: Persistência falha e atualização visual falha mantém persisted=False."""
+    cfg_file = tmp_path / "settings.json"
+    initial_content = {"volume_step": 12, "hotkeys": {}}
+    cfg_file.write_text(json.dumps(initial_content), encoding="utf-8")
+    mgr = ConfigManager(config_file=str(cfg_file))
+    mgr.save = MagicMock(return_value=False)  # type: ignore[assignment]
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="50"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=False),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+x", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    page_mock = MagicMock(spec=ft.Page)
+    page_mock.update.side_effect = RuntimeError("Erro de visualização")
+
+    holder: list[SaveOutcome] = []
+    res = save_settings_from_controls(
+        config_manager=mgr,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=page_mock,
+        outcome_holder=holder,
+    )
+
+    assert res is False
+    assert len(holder) == 1
+    assert holder[0].persisted is False
+
+    # Arquivo intacto
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["volume_step"] == 12
+
+
+def test_r02_persistence_succeeds_autostart_fails_and_visual_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R02 - Teste 6: Persistência ok, autostart falha e visual falha; resultado é preservado."""
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    # Simula autostart falhando
+    sync_mock = MagicMock(side_effect=RuntimeError("Acesso negado ao registro HKCU"))
+    monkeypatch.setattr(autostart, "sync", sync_mock)
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="35"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=True),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+alt+s", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    page_mock = MagicMock(spec=ft.Page)
+    page_mock.update.side_effect = RuntimeError("Falha de renderização Flet")
+
+    holder: list[SaveOutcome] = []
+    res = save_settings_from_controls(
+        config_manager=mgr,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=page_mock,
+        outcome_holder=holder,
+    )
+
+    # Persistência confirmada com sucesso em disco
+    assert res is True
+    assert len(holder) == 1
+    assert holder[0].persisted is True
+    assert holder[0].side_effects_ok is False  # Autostart falhou
+
+    # O arquivo no disco contém os novos dados
+    disk_data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert disk_data["volume_step"] == 35
+    assert disk_data["hotkeys"]["play_pause"] == "ctrl+alt+s"
