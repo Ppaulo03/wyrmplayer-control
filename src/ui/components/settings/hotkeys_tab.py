@@ -46,6 +46,7 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
             return
 
         field.value = hotkey
+        field.data = True
         on_save()
         status_text.value = f"{label.lower()} salvo: {hotkey}"
         status_text.color = theme.POSITIVE
@@ -62,14 +63,17 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
 
     def on_clear(label: str, field: ft.TextField, page: _PageLike) -> None:
         field.value = ""
+        field.data = True
         on_save()
         status_text.value = f"{label.lower()} limpo"
         status_text.color = theme.DIM
         page.update()
 
     def hotkey_row(label: str, key: str) -> ft.Control:
+        is_configured = key in cfg.hotkeys
         field = ft.TextField(
             value=cfg.hotkeys.get(key, ""),
+            data=is_configured,
             border=ft.InputBorder.NONE,
             bgcolor=theme.PLATE_1,
             color=theme.ACCENT,

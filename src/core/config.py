@@ -455,6 +455,12 @@ class ConfigManager:
     def save(self, config: AppConfig | None = None) -> bool:
         """Salva o estado das configurações no arquivo JSON de forma atômica e thread-safe.
 
+        Antes de qualquer operação em disco, valida os tipos, intervalos e estruturas
+        da configuração candidata através de _validate_and_build_config. Caso a validação
+        falhe, a persistência é abortada imediatamente, retornando False, sem criar
+        arquivos temporários, sem alterar o arquivo original em disco e sem modificar
+        o estado confirmado em self.config.
+
         Garante persistência atômica através da escrita em arquivo temporário no
         mesmo sistema de arquivos, seguida de flush, fsync e substituição via
         os.replace. Em caso de falha de gravação ou serialização, o arquivo
@@ -464,22 +470,59 @@ class ConfigManager:
         concorrentes não produzam divergência entre memória e disco.
 
         Limitações:
-            Se o chamador mutar diretamente atributos da instância compartilhada
-            em self.config (ex.: config_manager.config.volume_step = 10) antes de
-            invocar save(), tais alterações já residem no objeto em memória. Para
-            garantir isolamento estrito entre memória e disco em caso de falha,
-            recomenda-se passar uma nova instância para save(new_config).
+            1. Mutação de estado compartilhado:
+               Se o chamador mutar diretamente atributos da instância compartilhada
+               em self.config (ex.: config_manager.config.volume_step = -10) antes de
+               invocar save(), tais alterações já residem no objeto em memória. Caso
+               a validação rejeite os novos valores, o arquivo em disco permanece
+               inalterado, mas o objeto em memória terá os valores mutados. Para
+               garantir isolamento estrito entre memória e disco, recomenda-se
+               instanciar uma nova configuração candidata e passar para save(new_config).
+            2. Campos desconhecidos:
+               AppConfig define estritamente os campos conhecidos da aplicação. Campos
+               não reconhecidos presentes no arquivo original são ignorados durante
+               o carregamento e serão descartados caso o arquivo seja regravado por
+               save(), preservando o schema estrito da aplicação.
 
         Returns:
-            bool: True se a persistência e atualização foram bem-sucedidas;
-                  False caso tenha ocorrido qualquer erro de serialização,
+            bool: True se a validação, persistência e atualização foram bem-sucedidas;
+                  False caso tenha ocorrido qualquer erro de validação, serialização,
                   criação de diretório, escrita ou substituição.
         """
         with self._lock:
             target_config = config if config is not None else self.config
 
+            if not isinstance(target_config, AppConfig):
+                logger.error(
+                    "Tentativa de salvar configuração de tipo inválido em %s: "
+                    "esperava AppConfig, obtido %s.",
+                    self.config_path,
+                    type(target_config).__name__,
+                )
+                return False
+
             try:
-                payload = json.dumps(asdict(target_config), indent=4, ensure_ascii=False)
+                raw_data = asdict(target_config)
+                validated_config = _validate_and_build_config(raw_data)
+            except ConfigValidationError as err:
+                logger.error(
+                    "Configuração com valores ou tipos inválidos rejeitada antes de salvar em %s: "
+                    "%s. O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return False
+            except Exception as err:
+                logger.error(
+                    "Erro inesperado ao validar configurações antes de salvar em %s: %s. "
+                    "O arquivo original não foi modificado.",
+                    self.config_path,
+                    err,
+                )
+                return False
+
+            try:
+                payload = json.dumps(asdict(validated_config), indent=4, ensure_ascii=False)
             except Exception as e:
                 logger.error("Erro ao serializar configurações para JSON: %s", e)
                 return False
@@ -508,8 +551,7 @@ class ConfigManager:
                 temp_path = None
 
                 # Atualiza o estado em memória apenas após o sucesso confirmado em disco
-                if config is not None:
-                    self.config = config
+                self.config = validated_config
 
                 logger.info("Configurações salvas em %s", self.config_path)
                 return True

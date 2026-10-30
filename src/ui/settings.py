@@ -42,6 +42,14 @@ def save_settings_from_controls(
     try:
         g_data = getattr(tab_gen, "data", {})
         h_data = getattr(tab_hot, "data", {})
+        saved_hotkeys: dict[str, str] = {}
+        for k, v in h_data.items():
+            is_configured = getattr(v, "data", None)
+            if is_configured is False:
+                continue
+            val = getattr(v, "value", v)
+            saved_hotkeys[k] = (val or "").strip() if isinstance(val, str) else ""
+
         l_data = getattr(tab_lay, "data", {})
         i_data = getattr(tab_int, "data", {})
         a_data = getattr(tab_adv, "data", {})
@@ -57,7 +65,7 @@ def save_settings_from_controls(
             start_with_windows_elevated=bool(g_data["start_with_windows_elevated"].data),
             hud_monitor=int(l_data["hud_monitor"].value or 0),
             hud_position=l_data["hud_position"].value or "bottom_right",
-            hotkeys={k: (v.value or "").strip() for k, v in h_data.items()},
+            hotkeys=saved_hotkeys,
             triggers={
                 "volume": bool(l_data["volume"].data),
                 "metadata": bool(l_data["metadata"].data),
