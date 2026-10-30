@@ -742,3 +742,256 @@ async def test_websocket_commands_and_metadata_roundtrip(app_state: AppState) ->
 
     await server.stop()
     await task
+
+
+# ==============================================================================
+# Grupo E: Propagação de Cancelamentos e Supervisão de Cleanup (EST-03.1.3)
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_websocket_cancellation_of_pending_startup_preserves_prior_cleanup(
+    app_state: AppState,
+) -> None:
+    """R01 - Teste 2 & 3: Cancelar inicialização pendente propaga erro e não abre socket."""
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+
+    # 1. Inicia o servidor A
+    task_a = asyncio.create_task(server.start())
+    for _ in range(50):
+        if server.is_running:
+            break
+        await asyncio.sleep(0.01)
+    assert server.is_running is True
+
+    # 2. Atrasa o cleanup de A deterministicamente
+    server_a = server._server
+    assert server_a is not None
+    orig_wait_closed = server_a.wait_closed
+    cleanup_entered = asyncio.Event()
+    cleanup_gate = asyncio.Event()
+
+    async def delayed_wait_closed() -> None:
+        cleanup_entered.set()
+        await cleanup_gate.wait()
+        await orig_wait_closed()
+
+    server_a.wait_closed = delayed_wait_closed  # type: ignore[method-assign]
+
+    # Inicia encerramento de A
+    task_a.cancel()
+    await cleanup_entered.wait()
+    assert server.is_cleaning_up is True
+
+    # 3. Solicita inicialização B enquanto A está em cleanup
+    task_b = asyncio.create_task(server.start())
+    await asyncio.sleep(0.02)
+    assert not task_b.done()
+
+    # 4. Cancela B enquanto aguarda A
+    task_b.cancel()
+
+    # 5. B deve terminar imediatamente com CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await task_b
+
+    # 6. B não deve ter aberto socket nem criado broadcast
+    assert server.is_running is False
+    assert server._broadcast_task is None
+
+    # 7. Cleanup de A não foi interrompido e continua supervisionado
+    assert server.is_cleaning_up is True
+    assert not task_a.done()
+
+    # 8. Libera A para concluir
+    cleanup_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task_a
+
+    # 9. Aguarda cleanup_task de A finalizar completamente
+    if server._cleanup_task is not None:
+        await server._cleanup_task
+
+    assert server.is_cleaning_up is False
+    assert server._server is None
+    assert server._serving_task is None
+    assert server._stop_event is None
+    assert len(server.clients) == 0
+    assert server.state.active_connections == 0
+
+    # 10. Agora inicia C normalmente e confirma que opera perfeitamente
+    task_c = asyncio.create_task(server.start())
+    for _ in range(50):
+        if server.is_running:
+            break
+        await asyncio.sleep(0.01)
+
+    assert server.is_running is True
+    assert server.listening_port is not None and server.listening_port > 0
+
+    await server.stop()
+    await task_c
+    assert server.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_repeated_cancellations_during_wait_closed_preserves_supervision(
+    app_state: AppState,
+) -> None:
+    """R02 - Teste 6: Cancelamentos repetidos durante cleanup mantêm supervisão íntegra."""
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+    task = asyncio.create_task(server.start())
+    for _ in range(50):
+        if server.is_running:
+            break
+        await asyncio.sleep(0.01)
+    assert server.is_running is True
+
+    server_obj = server._server
+    assert server_obj is not None
+    orig_wc = server_obj.wait_closed
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def delayed_wc() -> None:
+        entered.set()
+        await gate.wait()
+        await orig_wc()
+
+    server_obj.wait_closed = delayed_wc  # type: ignore[method-assign]
+
+    # Primeiro cancelamento
+    task.cancel()
+    await entered.wait()
+
+    # Cleanup está em andamento e supervisionado
+    assert server.is_cleaning_up is True
+
+    # Cancelamentos adicionais repetidos
+    task.cancel()
+    task.cancel()
+
+    # Confirma que a instância NÃO declarou encerramento prematuro
+    assert server.is_cleaning_up is True
+    assert server.is_running is False
+
+    # Libera conclusão de wait_closed
+    gate.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    if server._cleanup_task is not None:
+        await server._cleanup_task
+
+    assert server.is_cleaning_up is False
+    assert server._server is None
+    assert server._broadcast_task is None
+
+    # Confirma que a mesma instância pode ser reutilizada
+    task2 = asyncio.create_task(server.start())
+    for _ in range(50):
+        if server.is_running:
+            break
+        await asyncio.sleep(0.01)
+    assert server.is_running is True
+    await server.stop()
+    await task2
+    assert server.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_stop_external_timeout_propagates_and_supervises_cleanup(
+    app_state: AppState,
+) -> None:
+    """OBS01 - Teste 9: Timeout em stop() propaga TimeoutError e preserva cleanup."""
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+    task = asyncio.create_task(server.start())
+    for _ in range(50):
+        if server.is_running:
+            break
+        await asyncio.sleep(0.01)
+    assert server.is_running is True
+
+    server_obj = server._server
+    assert server_obj is not None
+    orig_wc = server_obj.wait_closed
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def delayed_wc() -> None:
+        entered.set()
+        await gate.wait()
+        await orig_wc()
+
+    server_obj.wait_closed = delayed_wc  # type: ignore[method-assign]
+
+    # Executa stop() com prazo curto que expira
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(server.stop(), timeout=0.03)
+
+    # O timeout foi comunicado ao chamador, mas o cleanup continua supervisionado
+    assert server.is_cleaning_up is True
+
+    # Libera a finalização
+    gate.set()
+    await task
+
+    if server._cleanup_task is not None:
+        await server._cleanup_task
+
+    assert server.is_cleaning_up is False
+    assert server._server is None
+    assert server._broadcast_task is None
+
+
+@pytest.mark.asyncio
+async def test_websocket_stop_waiting_task_cancellation_does_not_abort_cleanup(
+    app_state: AppState,
+) -> None:
+    """OBS01 - Teste 10: Cancelar observador de stop() não aborta o cleanup original."""
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+    task = asyncio.create_task(server.start())
+    for _ in range(50):
+        if server.is_running:
+            break
+        await asyncio.sleep(0.01)
+    assert server.is_running is True
+
+    server_obj = server._server
+    assert server_obj is not None
+    orig_wc = server_obj.wait_closed
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def delayed_wc() -> None:
+        entered.set()
+        await gate.wait()
+        await orig_wc()
+
+    server_obj.wait_closed = delayed_wc  # type: ignore[method-assign]
+
+    # Inicia stop() em tarefa observadora 1
+    stop_task_1 = asyncio.create_task(server.stop())
+    await entered.wait()
+
+    # Tarefa observadora 2 também aguarda stop()
+    stop_task_2 = asyncio.create_task(server.stop())
+    await asyncio.sleep(0.01)
+
+    # Cancela somente a tarefa observadora 2
+    stop_task_2.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task_2
+
+    # Cleanup continua ativo e supervisionado
+    assert server.is_cleaning_up is True
+    assert not stop_task_1.done()
+
+    # Libera finalização
+    gate.set()
+    await stop_task_1
+    await task
+
+    assert server.is_cleaning_up is False
+    assert server._server is None
