@@ -2,14 +2,18 @@ import asyncio
 import logging
 import socket
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import websockets
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import Server
 
+from src.core.config import ConfigManager
 from src.core.state import AppState
 from src.core.websocket import MusicWebSocketServer
+from src.services.config_watcher import ConfigWatcher
+from src.services.websocket_manager import WebSocketManager
 
 
 @pytest.fixture
@@ -995,3 +999,320 @@ async def test_websocket_stop_waiting_task_cancellation_does_not_abort_cleanup(
 
     assert server.is_cleaning_up is False
     assert server._server is None
+
+
+# ==============================================================================
+# Grupo F: Reinicialização Dinâmica e Alterações de Porta (EST-03.2)
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_normal_port_change_and_client_connection(
+    app_state: AppState,
+) -> None:
+    """R01 - Testes 1, 2, 3: Reinício normal com troca de porta, liberação e nova conexão."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    started = await manager.start()
+    assert started is True
+    assert manager.is_running is True
+
+    port_a = manager.listening_port
+    assert port_a is not None and port_a > 0
+
+    # Cliente conecta na porta A
+    async with connect(f"ws://127.0.0.1:{port_a}") as client_a:
+        manager.enqueue_command("cmd_on_a")
+        msg = await asyncio.wait_for(client_a.recv(), timeout=2.0)
+        assert msg == "cmd_on_a"
+
+    # Aloca uma porta B livre
+    sock_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_b.bind(("127.0.0.1", 0))
+    port_b = sock_b.getsockname()[1]
+    sock_b.close()
+    await asyncio.sleep(0.01)
+
+    # Reinicia na porta B
+    success = await manager.restart(port_b)
+    assert success is True
+    assert manager.is_running is True
+    assert manager.listening_port == port_b
+
+    # Porta A deve estar liberada e não receber conexões
+    with pytest.raises(OSError):
+        async with connect(f"ws://127.0.0.1:{port_a}"):
+            pass
+
+    # Porta B aceita conexões e comandos normais
+    async with connect(f"ws://127.0.0.1:{port_b}") as client_b:
+        manager.enqueue_command("cmd_on_b")
+        msg = await asyncio.wait_for(client_b.recv(), timeout=2.0)
+        assert msg == "cmd_on_b"
+
+    await manager.stop()
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_occupied_port_failure_and_recovery(
+    app_state: AppState,
+) -> None:
+    """R02 - Testes 4, 5: Porta nova ocupada falha de forma controlada e recupera quando livre."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    await manager.start()
+    assert manager.is_running is True
+
+    # Ocupa uma porta B externamente
+    sock_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_b.bind(("127.0.0.1", 0))
+    port_b = sock_b.getsockname()[1]
+
+    try:
+        # Tenta reiniciar na porta ocupada
+        success = await manager.restart(port_b)
+        assert success is False
+        assert manager.is_running is False
+        assert manager.listening_port is None
+    finally:
+        # Libera a porta B
+        sock_b.close()
+
+    await asyncio.sleep(0.02)
+
+    # Nova tentativa na porta B agora desocupada
+    recovery = await manager.restart(port_b)
+    assert recovery is True
+    assert manager.is_running is True
+    assert manager.listening_port == port_b
+
+    await manager.stop()
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_successive_and_concurrent_port_changes(
+    app_state: AppState,
+) -> None:
+    """R03 - Testes 6, 7: Alterações sucessivas e concorrentes convergem deterministicamente."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    await manager.start()
+    port_a = manager.listening_port
+    assert port_a is not None
+
+    # Reserva duas portas livres
+    s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s1.bind(("127.0.0.1", 0))
+    port_b = s1.getsockname()[1]
+    s1.close()
+
+    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s2.bind(("127.0.0.1", 0))
+    port_c = s2.getsockname()[1]
+    s2.close()
+    await asyncio.sleep(0.01)
+
+    # Dispara solicitações sucessivas e concorrentes de restart
+    res_b, res_c = await asyncio.gather(
+        manager.restart(port_b),
+        manager.restart(port_c),
+    )
+
+    # Ambas devem concluir sem exceções
+    assert res_b is True or res_c is True
+    assert manager.is_running is True
+
+    # O servidor ativo final deve corresponder à porta final consolidada
+    assert manager.listening_port == port_c
+
+    # Portas intermediárias e anteriores não devem reter conexões
+    for p in [port_a, port_b]:
+        if p != port_c:
+            with pytest.raises(OSError):
+                async with connect(f"ws://127.0.0.1:{p}"):
+                    pass
+
+    # A porta consolidada opera normalmente
+    async with connect(f"ws://127.0.0.1:{port_c}") as client_c:
+        manager.enqueue_command("ping_c")
+        msg = await asyncio.wait_for(client_c.recv(), timeout=2.0)
+        assert msg == "ping_c"
+
+    await manager.stop()
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_shutdown_during_pending_restart_prevents_new_server(
+    app_state: AppState,
+) -> None:
+    """R04 - Teste 8: Encerramento global durante reinício pendente impede novo socket."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    await manager.start()
+    assert manager.is_running is True
+
+    # Atrasa deterministamente o encerramento do servidor atual
+    curr_server = manager.server
+    assert curr_server is not None
+    orig_server_obj = curr_server._server
+    assert orig_server_obj is not None
+    orig_wc = orig_server_obj.wait_closed
+    entered_wc = asyncio.Event()
+    gate_wc = asyncio.Event()
+
+    async def delayed_wc() -> None:
+        entered_wc.set()
+        await gate_wc.wait()
+        await orig_wc()
+
+    orig_server_obj.wait_closed = delayed_wc  # type: ignore[method-assign]
+
+    # Reserva porta para o restart
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    target_port = s.getsockname()[1]
+    s.close()
+    await asyncio.sleep(0.01)
+
+    # Dispara o restart em background
+    restart_task = asyncio.create_task(manager.restart(target_port))
+    await entered_wc.wait()
+
+    # Dispara o shutdown definitivo do manager
+    stop_task = asyncio.create_task(manager.stop())
+    await asyncio.sleep(0.01)
+
+    # Libera a finalização do servidor antigo
+    gate_wc.set()
+
+    res_restart = await restart_task
+    await stop_task
+
+    # O restart não deve ter aberto o novo servidor
+    assert res_restart is False
+    assert manager.is_running is False
+    assert manager.listening_port is None
+
+    # A porta alvo não deve estar escutando
+    with pytest.raises(OSError):
+        async with connect(f"ws://127.0.0.1:{target_port}"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_websocket_config_watcher_dynamic_port_change_and_invalid_handling(
+    app_state: AppState, tmp_path: Any
+) -> None:
+    """R05 - Testes 9, 10, 11: ConfigWatcher detecta troca de porta e ignora JSON inválido."""
+    config_file = tmp_path / "settings.json"
+    s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s1.bind(("127.0.0.1", 0))
+    port_1 = s1.getsockname()[1]
+    s1.close()
+
+    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s2.bind(("127.0.0.1", 0))
+    port_2 = s2.getsockname()[1]
+    s2.close()
+    await asyncio.sleep(0.01)
+
+    config_file.write_text(f'{{"websocket_port": {port_1}}}', encoding="utf-8")
+    cfg_mgr = ConfigManager(config_file=str(config_file))
+    cfg_mgr.load()
+
+    manager = WebSocketManager(app_state, initial_port=port_1)
+    await manager.start()
+    assert manager.listening_port == port_1
+
+    exit_event = asyncio.Event()
+
+    async def on_port_change(p: int) -> None:
+        await manager.restart(p)
+
+    mock_hotkeys = MagicMock()
+    mock_hotkeys.is_input_desktop_accessible.return_value = True
+    mock_hud = MagicMock()
+    mock_hud.show_hud = AsyncMock()
+
+    watcher = ConfigWatcher(
+        hotkeys=mock_hotkeys,
+        hud=mock_hud,
+        state=app_state,
+        config=cfg_mgr,
+        on_websocket_port_change=on_port_change,
+        on_spotify_integration_change=MagicMock(),
+    )
+    watcher_task = asyncio.create_task(watcher.start(exit_event))
+
+    try:
+        # 1. Altera porta para port_2
+        await asyncio.sleep(0.1)
+        config_file.write_text(f'{{"websocket_port": {port_2}}}', encoding="utf-8")
+
+        for _ in range(50):
+            if manager.listening_port == port_2:
+                break
+            await asyncio.sleep(0.05)
+
+        assert manager.listening_port == port_2
+        assert manager.is_running is True
+
+        # 2. Escreve conteúdo inválido no settings.json (não deve alterar porta nem quebrar)
+        await asyncio.sleep(0.1)
+        config_file.write_text('{"websocket_port": INVALID_JSON', encoding="utf-8")
+        await asyncio.sleep(0.6)
+
+        assert manager.listening_port == port_2
+        assert manager.is_running is True
+
+        # 3. Alteração mantendo a mesma porta (não dispara novo restart desnecessário)
+        config_file.write_text(
+            f'{{"websocket_port": {port_2}, "log_level": "DEBUG"}}', encoding="utf-8"
+        )
+        await asyncio.sleep(0.6)
+        assert manager.listening_port == port_2
+
+    finally:
+        exit_event.set()
+        await watcher_task
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_stop_requested_flag_aborts_slow_bind_before_serving(
+    app_state: AppState,
+) -> None:
+    """R06 - Teste 12: Flag _stop_requested aborta bind lento e impede socket órfão."""
+    server = MusicWebSocketServer(app_state, host="127.0.0.1", port=0)
+    orig_serve = websockets.serve
+
+    bind_in_progress = asyncio.Event()
+    unblock_bind = asyncio.Event()
+
+    async def slow_serve(*args: Any, **kwargs: Any) -> Server:
+        bind_in_progress.set()
+        await unblock_bind.wait()
+        return await orig_serve(*args, **kwargs)
+
+    websockets.serve = slow_serve  # type: ignore[assignment]
+    try:
+        start_task = asyncio.create_task(server.start())
+        await bind_in_progress.wait()
+
+        # Timeout curto simulando cancelamento antes de obter o lock de stop
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(server.stop(), timeout=0.01)
+
+        # Confirma que _stop_requested foi marcado
+        assert server._stop_requested is True
+
+        # Libera o bind para finalizar
+        unblock_bind.set()
+        await start_task
+
+        # O servidor detecta _stop_requested, encerra o socket alocado e não fica escutando
+        assert server.is_running is False
+        assert server._server is None
+
+    finally:
+        unblock_bind.set()
+        websockets.serve = orig_serve  # type: ignore[assignment]

@@ -33,6 +33,7 @@ class MusicWebSocketServer:
         self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
         self._is_starting: bool = False
         self._is_stopping: bool = False
+        self._stop_requested: bool = False
         self._active_cycle_id: int = 0
 
     @property
@@ -109,6 +110,7 @@ class MusicWebSocketServer:
                 return
 
             self._is_starting = True
+            self._stop_requested = False
             self._loop = asyncio.get_running_loop()
             stop_event = asyncio.Event()
             self._stop_event = stop_event
@@ -167,6 +169,24 @@ class MusicWebSocketServer:
                     await asyncio.shield(cleanup_task)
                 raise
 
+            if self._stop_requested:
+                self._is_starting = False
+                if self._serving_task is current_task:
+                    self._serving_task = None
+                if self._stop_event is stop_event:
+                    self._stop_event = None
+                if server is not None:
+                    cleanup_task = self._ensure_cleanup_task(
+                        server=server,
+                        broadcast_task=None,
+                        stop_event=stop_event,
+                        cycle_clients=cycle_clients,
+                        cycle_id=cycle_id,
+                        serving_task=current_task,
+                    )
+                    await asyncio.shield(cleanup_task)
+                return
+
             self._server = server
             self._is_starting = False
             actual_port = self.listening_port or self.port
@@ -193,6 +213,7 @@ class MusicWebSocketServer:
 
     async def stop(self) -> None:
         """Encerra o servidor WebSocket e desconecta clientes de forma coordenada e idempotente."""
+        self._stop_requested = True
         async with self._lifecycle_lock:
             if (
                 not self.is_running

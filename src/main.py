@@ -19,11 +19,11 @@ from src.core.hotkeys import HotkeyManager
 from src.core.logging_config import setup_initial_logging
 from src.core.single_instance import SingleInstance
 from src.core.state import AppState
-from src.core.websocket import MusicWebSocketServer
 from src.infrastructure import win32
 from src.services import spotify_setup
 from src.services.config_watcher import ConfigWatcher
 from src.services.player_controller import PlayerController
+from src.services.websocket_manager import WebSocketManager
 from src.ui.hud import MusicHUD
 from src.ui.settings import main as settings_main
 from src.ui.tray import SystemTrayManager
@@ -67,36 +67,10 @@ async def app_main(page: ft.Page) -> None:
     exit_event = asyncio.Event()
     runtime_cfg = cfg_manager.load()
 
-    # 1. Inicializa o servidor WebSocket (Porta 8975)
-    server = MusicWebSocketServer(state, port=runtime_cfg.websocket_port)
-
-    # 2. Inicializa a lógica de controle do player
-    controller = PlayerController(state, cfg_manager, server, loop=loop)
-
-    server_task: asyncio.Task[None] | None = None
-
-    async def restart_websocket_server(new_port: int) -> None:
-        nonlocal server, server_task
-
-        logger.info("Reiniciando servidor WebSocket na porta %s...", new_port)
-        if server is not None:
-            try:
-                await server.stop()
-            except Exception as e:
-                logger.warning("Falha ao encerrar WebSocket anterior: %s", e)
-
-        if server_task is not None and not server_task.done():
-            server_task.cancel()
-            try:
-                await server_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.warning("Falha ao aguardar tarefa de WebSocket anterior: %s", e)
-
-        server = MusicWebSocketServer(state, port=new_port)
-        controller.set_messenger(server)
-        server_task = asyncio.create_task(server.start())
+    # 1. Inicializa o gerenciador WebSocket e controlador do player
+    ws_manager = WebSocketManager(state, runtime_cfg.websocket_port)
+    controller = PlayerController(state, cfg_manager, ws_manager, loop=loop)
+    ws_manager.controller = controller
 
     # 3. Configura o gerenciador de atalhos globais
     hotkeys = HotkeyManager(controller, cfg_manager)
@@ -124,18 +98,21 @@ async def app_main(page: ft.Page) -> None:
     await hud.main(page)
 
     # 6. Inicializa o Monitor de Configurações
+    async def handle_port_change(new_port: int) -> None:
+        await ws_manager.restart(new_port)
+
     watcher = ConfigWatcher(
         hotkeys=hotkeys,
         hud=hud,
         state=state,
         config=cfg_manager,
-        on_websocket_port_change=restart_websocket_server,
+        on_websocket_port_change=handle_port_change,
         on_spotify_integration_change=tray.refresh_menu,
     )
 
     # 7. Inicia tarefas em background
     logger.info("Iniciando tarefas de background...")
-    server_task = asyncio.create_task(server.start())
+    await ws_manager.start()
     config_watch_task = asyncio.create_task(watcher.start(exit_event))
 
     spotify_check_task: asyncio.Task[spotify_setup.SpotifySetupStatus] | None = None
@@ -154,14 +131,10 @@ async def app_main(page: ft.Page) -> None:
         logger.error(f"Erro inesperado no loop principal: {e}")
     finally:
         # Encerramento gracioso do WebSocket
-        if server is not None:
-            try:
-                await server.stop()
-            except Exception as e:
-                logger.warning("Falha ao encerrar servidor WebSocket no desligamento: %s", e)
+        await ws_manager.stop()
 
         # Cancelamento das tarefas em background
-        for task in [server_task, config_watch_task, spotify_check_task]:
+        for task in [config_watch_task, spotify_check_task]:
             if task and not task.done():
                 task.cancel()
 
