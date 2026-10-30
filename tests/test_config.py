@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import flet as ft
 import pytest
 
 from src.core import autostart
@@ -2164,3 +2165,317 @@ def test_integration_hotkey_manager_does_not_register_unconfigured_hotkeys(
     assert not any("up" in s for s in registered_shortcuts)
     assert not any("down" in s for s in registered_shortcuts)
     assert not any("m" in s for s in registered_shortcuts)
+
+
+# ==============================================================================
+# EST-02.2B.2.1: Preservação de Referências e Correção de Feedback de Salvamento
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# R01: Preservação da Identidade de self.config e Normalização
+# ------------------------------------------------------------------------------
+
+
+def test_r01_save_without_args_preserves_self_config_identity(
+    config_manager: ConfigManager,
+) -> None:
+    """R01 - Teste 1: save() sem argumentos preserva rigorosamente a identidade de self.config."""
+    cfg_ref = config_manager.get_all()
+    assert config_manager.save() is True
+    assert config_manager.get_all() is cfg_ref
+    assert config_manager.config is cfg_ref
+
+
+def test_r01_subsequent_mutations_on_same_reference_are_persisted(
+    config_manager: ConfigManager,
+) -> None:
+    """R01 - Teste 2: Mutações posteriores na referência prévia são persistidas em novo save()."""
+    cfg_ref = config_manager.get_all()
+    assert config_manager.save() is True
+
+    # Altera campo na referência anterior
+    cfg_ref.volume_step = 25
+    assert config_manager.save() is True
+
+    # Verifica persistência no disco e sincronização em memória
+    assert config_manager.config.volume_step == 25
+    assert config_manager.get_all() is cfg_ref
+
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        disk_data = json.load(f)
+    assert disk_data["volume_step"] == 25
+
+
+def test_r01_normalization_applied_in_place_preserving_identity(
+    config_manager: ConfigManager,
+) -> None:
+    """R01 - Teste 3: Normalização é sincronizada in-place na mesma instância gerenciada."""
+    cfg_ref = config_manager.get_all()
+    cfg_ref.log_level = "debug"
+
+    assert config_manager.save() is True
+
+    # Identidade inalterada
+    assert config_manager.config is cfg_ref
+    # Valor normalizado na mesma instância
+    assert cfg_ref.log_level == "DEBUG"
+    assert config_manager.config.log_level == "DEBUG"
+
+    # Persistido em maiúsculas no disco
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        disk_data = json.load(f)
+    assert disk_data["log_level"] == "DEBUG"
+
+
+def test_r01_save_with_explicit_config_replaces_identity(
+    config_manager: ConfigManager,
+) -> None:
+    """R01 - Teste 4: save(new_config) substitui intencionalmente a configuração gerenciada."""
+    initial_ref = config_manager.get_all()
+    new_candidate = AppConfig(volume_step=40, websocket_port=9200)
+
+    assert config_manager.save(new_candidate) is True
+    assert config_manager.config is not initial_ref
+    assert config_manager.config.volume_step == 40
+    assert config_manager.config.websocket_port == 9200
+
+
+def test_r01_save_failures_preserve_identity_and_original_file(
+    config_manager: ConfigManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R01 - Teste 5: Falhas de validação e I/O mantêm a identidade e não corrompem o arquivo."""
+    initial_ref = config_manager.get_all()
+    initial_ref.volume_step = 14
+    assert config_manager.save() is True
+
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        original_json = f.read()
+
+    # 1. Falha de validação
+    initial_ref.volume_step = -99
+    res_val = config_manager.save()
+    assert res_val is False
+    assert config_manager.config is initial_ref
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        assert f.read() == original_json
+
+    # Restaura valor válido
+    initial_ref.volume_step = 14
+
+    # 2. Falha durante escrita temporária (fsync)
+    monkeypatch.setattr(os, "fsync", MagicMock(side_effect=OSError("Disk failure")))
+    initial_ref.volume_step = 18
+    res_io = config_manager.save()
+    assert res_io is False
+    assert config_manager.config is initial_ref
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        assert f.read() == original_json
+
+    # 3. Falha durante replace
+    monkeypatch.undo()
+    monkeypatch.setattr(os, "replace", MagicMock(side_effect=OSError("Replace failure")))
+    res_rep = config_manager.save()
+    assert res_rep is False
+    assert config_manager.config is initial_ref
+    with open(config_manager.config_path, encoding="utf-8") as f:
+        assert f.read() == original_json
+
+
+# ------------------------------------------------------------------------------
+# R02: Feedback de Salvamento nos Eventos de Hotkeys
+# ------------------------------------------------------------------------------
+
+
+def test_r02_hotkey_capture_success_shows_confirmation(tmp_path: Path) -> None:
+    """R02 - Teste 1: Captura com sucesso persiste atalho e exibe status positivo."""
+    from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+
+    cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
+    status_text = theme.mono("")
+
+    save_called = False
+
+    def on_save_mock() -> bool:
+        nonlocal save_called
+        save_called = True
+        return True
+
+    col = hotkeys_tab(cfg, on_save_mock, status_text)
+    fields = getattr(col, "data", {})
+    pp_field = fields["play_pause"]
+
+    row_container = col.controls[3]
+    inner_row = row_container.content
+    btn_record = inner_row.controls[2]
+
+    page = MagicMock(spec=ft.Page)
+    btn_record.on_click(MagicMock(page=page))
+
+    # Simula captura de tecla
+    key_event = MagicMock(key="k", ctrl=True, shift=False, alt=False, meta=False, page=page)
+    page.on_keyboard_event(key_event)
+
+    assert save_called is True
+    assert pp_field.value == "ctrl+k"
+    assert pp_field.data is True
+    assert status_text.color == theme.POSITIVE
+    assert "salvo" in str(status_text.value).lower()
+
+
+def test_r02_hotkey_capture_failure_preserves_error_and_restores_field(tmp_path: Path) -> None:
+    """R02 - Teste 2: Falha na captura preserva diagnóstico de erro e restaura campo anterior."""
+    from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+
+    cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
+    status_text = theme.mono("")
+
+    def on_save_failure() -> bool:
+        status_text.value = "erro ao salvar configurações"
+        status_text.color = theme.DANGER
+        return False
+
+    col = hotkeys_tab(cfg, on_save_failure, status_text)
+    fields = getattr(col, "data", {})
+    pp_field = fields["play_pause"]
+
+    row_container = col.controls[3]
+    inner_row = row_container.content
+    btn_record = inner_row.controls[2]
+
+    page = MagicMock(spec=ft.Page)
+    btn_record.on_click(MagicMock(page=page))
+
+    key_event = MagicMock(key="k", ctrl=True, shift=False, alt=False, meta=False, page=page)
+    page.on_keyboard_event(key_event)
+
+    # Não sobrescreve mensagem de erro com sucesso
+    assert status_text.color == theme.DANGER
+    assert "erro" in str(status_text.value).lower()
+    # Restaura valor e estado anterior do campo
+    assert pp_field.value == "ctrl+p"
+    assert pp_field.data is True
+
+
+def test_r02_hotkey_clear_success_shows_confirmation(tmp_path: Path) -> None:
+    """R02 - Teste 3: Limpeza de atalho com sucesso atualiza campo para vazio e exibe status."""
+    from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+
+    cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
+    status_text = theme.mono("")
+
+    save_called = False
+
+    def on_save_mock() -> bool:
+        nonlocal save_called
+        save_called = True
+        return True
+
+    col = hotkeys_tab(cfg, on_save_mock, status_text)
+    fields = getattr(col, "data", {})
+    pp_field = fields["play_pause"]
+
+    row_container = col.controls[3]
+    inner_row = row_container.content
+    btn_clear = inner_row.controls[3]
+
+    page = MagicMock(spec=ft.Page)
+    btn_clear.on_click(MagicMock(page=page))
+
+    assert save_called is True
+    assert pp_field.value == ""
+    assert pp_field.data is True
+    assert status_text.color == theme.DIM
+    assert "limpo" in str(status_text.value).lower()
+
+
+def test_r02_hotkey_clear_failure_preserves_error_and_restores_field(tmp_path: Path) -> None:
+    """R02 - Teste 4: Falha na limpeza preserva mensagem de erro e restaura campo anterior."""
+    from src.ui.components.settings.hotkeys_tab import hotkeys_tab
+
+    cfg = AppConfig(hotkeys={"play_pause": "ctrl+p"})
+    status_text = theme.mono("")
+
+    def on_save_failure() -> bool:
+        status_text.value = "erro ao salvar configurações"
+        status_text.color = theme.DANGER
+        return False
+
+    col = hotkeys_tab(cfg, on_save_failure, status_text)
+    fields = getattr(col, "data", {})
+    pp_field = fields["play_pause"]
+
+    row_container = col.controls[3]
+    inner_row = row_container.content
+    btn_clear = inner_row.controls[3]
+
+    page = MagicMock(spec=ft.Page)
+    btn_clear.on_click(MagicMock(page=page))
+
+    # Erro preservado, status não indica limpeza concluída
+    assert status_text.color == theme.DANGER
+    assert "erro" in str(status_text.value).lower()
+    # Campo restaurado para atalho anterior
+    assert pp_field.value == "ctrl+p"
+    assert pp_field.data is True
+
+
+def test_r02_hotkey_save_failure_blocks_autostart_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R02 - Teste 6: Falha no salvamento bloqueia sincronização de autostart."""
+    sync_mock = MagicMock()
+    monkeypatch.setattr(autostart, "sync", sync_mock)
+
+    cfg_file = tmp_path / "settings.json"
+    mgr = ConfigManager(config_file=str(cfg_file))
+
+    # Força falha de persistência simulada
+    monkeypatch.setattr(mgr, "save", MagicMock(return_value=False))
+
+    status_text = theme.mono("")
+    status_dot = theme.diamond(5, theme.POSITIVE)
+
+    tab_gen = _DummyTab(
+        {
+            "volume_step": _DummyControl(value="10"),
+            "hud_display_time": _DummyControl(value="3"),
+            "start_with_windows": _DummyControl(data=True),
+            "start_with_windows_elevated": _DummyControl(data=False),
+        }
+    )
+    tab_hot = _DummyTab({"play_pause": _DummyControl(value="ctrl+p", data=True)})
+    tab_lay = _DummyTab(
+        {
+            "hud_monitor": _DummyControl(value="0"),
+            "hud_position": _DummyControl(value="bottom_right"),
+            "volume": _DummyControl(data=True),
+            "metadata": _DummyControl(data=True),
+            "playback": _DummyControl(data=True),
+        }
+    )
+    tab_int = _DummyTab({"spotify_integration": _DummyControl(data=False)})
+    tab_adv = _DummyTab(
+        {
+            "websocket_port": _DummyControl(value="8974"),
+            "log_level": _DummyControl(value="INFO"),
+            "log_file": _DummyControl(value="wyrmplayer.log"),
+        }
+    )
+
+    res = save_settings_from_controls(
+        config_manager=mgr,
+        tab_gen=tab_gen,
+        tab_hot=tab_hot,
+        tab_lay=tab_lay,
+        tab_int=tab_int,
+        tab_adv=tab_adv,
+        status_text=status_text,
+        status_dot=status_dot,
+        page=None,
+    )
+
+    assert res is False
+    assert status_text.color == theme.DANGER
+    assert status_dot.bgcolor == theme.DANGER
+    sync_mock.assert_not_called()

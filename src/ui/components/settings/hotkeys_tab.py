@@ -16,7 +16,7 @@ class _CaptureState:
     label: str = ""
 
 
-def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Text) -> ft.Control:
+def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], bool], status_text: ft.Text) -> ft.Control:
     """Seção Atalhos: captura de combinações de teclado."""
 
     fields: dict[str, ft.TextField] = {}
@@ -45,11 +45,19 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
             stop_capture(e.page)
             return
 
+        prev_value = field.value
+        prev_data = field.data
+
         field.value = hotkey
         field.data = True
-        on_save()
-        status_text.value = f"{label.lower()} salvo: {hotkey}"
-        status_text.color = theme.POSITIVE
+        saved = on_save()
+        if saved:
+            status_text.value = f"{label.lower()} salvo: {hotkey}"
+            status_text.color = theme.POSITIVE
+        else:
+            field.value = prev_value
+            field.data = prev_data
+
         stop_capture(e.page)
 
     def start_capture(field: ft.TextField, label: str, page: _PageLike) -> None:
@@ -62,11 +70,19 @@ def hotkeys_tab(cfg: AppConfig, on_save: Callable[[], None], status_text: ft.Tex
         page.update()
 
     def on_clear(label: str, field: ft.TextField, page: _PageLike) -> None:
+        prev_value = field.value
+        prev_data = field.data
+
         field.value = ""
         field.data = True
-        on_save()
-        status_text.value = f"{label.lower()} limpo"
-        status_text.color = theme.DIM
+        saved = on_save()
+        if saved:
+            status_text.value = f"{label.lower()} limpo"
+            status_text.color = theme.DIM
+        else:
+            field.value = prev_value
+            field.data = prev_data
+
         page.update()
 
     def hotkey_row(label: str, key: str) -> ft.Control:

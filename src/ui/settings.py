@@ -170,8 +170,8 @@ async def main(page: ft.Page) -> None:
     # --- Instanciação das seções ---
     tab_gen = general_tab(cfg, on_ui_change)
 
-    def on_hotkeys_save() -> None:
-        save_settings()
+    def on_hotkeys_save() -> bool:
+        return save_settings()
 
     tab_hot = hotkeys_tab(cfg, on_hotkeys_save, status_text)
     tab_lay = layout_tab(cfg, on_ui_change)

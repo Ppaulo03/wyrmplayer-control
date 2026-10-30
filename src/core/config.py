@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -469,6 +469,16 @@ class ConfigManager:
         A operação completa é protegida por self._lock, garantindo que salvamentos
         concorrentes não produzam divergência entre memória e disco.
 
+        Preservação de identidade:
+            Quando invocado sem argumentos (save()), a identidade da instância
+            gerenciada em self.config é preservada, garantindo compatibilidade com
+            consumidores que mantêm referências obtidas via get_all(). Quaisquer
+            campos normalizados (ex.: log_level em maiúsculas) são sincronizados
+            na instância existente somente após a substituição atômica confirmada.
+            Quando invocado com uma nova configuração explícita (save(new_config)),
+            a referência gerenciada é intencionalmente substituída pela nova
+            instância validada.
+
         Limitações:
             1. Mutação de estado compartilhado:
                Se o chamador mutar diretamente atributos da instância compartilhada
@@ -482,7 +492,8 @@ class ConfigManager:
                AppConfig define estritamente os campos conhecidos da aplicação. Campos
                não reconhecidos presentes no arquivo original são ignorados durante
                o carregamento e serão descartados caso o arquivo seja regravado por
-               save(), preservando o schema estrito da aplicação.
+               save(), preservando o schema estrito da aplicação (decisão formal de
+               compatibilidade do Planner).
 
         Returns:
             bool: True se a validação, persistência e atualização foram bem-sucedidas;
@@ -551,7 +562,24 @@ class ConfigManager:
                 temp_path = None
 
                 # Atualiza o estado em memória apenas após o sucesso confirmado em disco
-                self.config = validated_config
+                if config is not None:
+                    self.config = validated_config
+                else:
+                    # Preserva a identidade da instância gerenciada em self.config
+                    # para consumidores que mantêm referências (ex.: get_all()),
+                    # sincronizando os valores validados e normalizados.
+                    for cfg_field in fields(AppConfig):
+                        val = getattr(validated_config, cfg_field.name)
+                        if cfg_field.name == "hotkeys" and isinstance(self.config.hotkeys, dict):
+                            self.config.hotkeys.clear()
+                            self.config.hotkeys.update(val)
+                        elif cfg_field.name == "triggers" and isinstance(
+                            self.config.triggers, dict
+                        ):
+                            self.config.triggers.clear()
+                            self.config.triggers.update(val)
+                        else:
+                            setattr(self.config, cfg_field.name, val)
 
                 logger.info("Configurações salvas em %s", self.config_path)
                 return True
