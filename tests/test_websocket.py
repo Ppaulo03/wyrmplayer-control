@@ -1316,3 +1316,417 @@ async def test_websocket_stop_requested_flag_aborts_slow_bind_before_serving(
     finally:
         unblock_bind.set()
         websockets.serve = orig_serve  # type: ignore[assignment]
+
+
+# ==============================================================================
+# Grupo G: Supervisão e Consistência do WebSocketManager (EST-03.2.1)
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_controller_messenger_stable_reference(
+    app_state: AppState, tmp_path: Any
+) -> None:
+    """R01 - Testes 1, 2, 3, 4: Preservação de messenger estável, falha de bind e recuperação."""
+    config_file = tmp_path / "settings.json"
+    config_file.write_text('{"websocket_port": 0}', encoding="utf-8")
+    cfg_mgr = ConfigManager(config_file=str(config_file))
+
+    manager = WebSocketManager(app_state, initial_port=0)
+    from src.services.player_controller import PlayerController
+
+    controller = PlayerController(app_state, cfg_mgr, manager, loop=asyncio.get_running_loop())
+
+    # Teste 1: Referência inicial é o gerenciador
+    assert controller.messenger is manager
+
+    # Inicia o servidor
+    started = await manager.start()
+    assert started is True
+    assert manager.is_running is True
+    port_a = manager.listening_port
+    assert port_a is not None and port_a > 0
+    # Messenger permanece sendo o gerenciador
+    assert controller.messenger is manager
+
+    # Múltiplos reinícios
+    s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s1.bind(("127.0.0.1", 0))
+    port_b = s1.getsockname()[1]
+    s1.close()
+
+    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s2.bind(("127.0.0.1", 0))
+    port_c = s2.getsockname()[1]
+    s2.close()
+    await asyncio.sleep(0.01)
+
+    await manager.restart(port_b)
+    assert controller.messenger is manager
+    assert manager.listening_port == port_b
+
+    await manager.restart(port_c)
+    assert controller.messenger is manager
+    assert manager.listening_port == port_c
+
+    # Teste 2: Porta ocupada
+    sock_occ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_occ.bind(("127.0.0.1", 0))
+    port_occ = sock_occ.getsockname()[1]
+
+    try:
+        success = await manager.restart(port_occ)
+        assert success is False
+        assert manager.is_running is False
+        assert manager.listening_port is None
+        assert manager.server is None
+        # Controlador continua associado ao gerenciador
+        assert controller.messenger is manager
+
+        # Teste 3: Comando sem servidor operacional
+        # Envio de comando via controller ou manager é descartado sem erro
+        controller.play_pause()
+        manager.enqueue_command("test_command_dropped")
+
+    finally:
+        sock_occ.close()
+
+    await asyncio.sleep(0.02)
+
+    # Teste 4: Recuperação mediante nova solicitação explícita
+    recovery = await manager.restart(port_occ)
+    assert recovery is True
+    assert manager.is_running is True
+    assert manager.listening_port == port_occ
+    assert controller.messenger is manager
+
+    # Cliente conecta e recebe comando normalmente
+    async with connect(f"ws://127.0.0.1:{port_occ}") as client:
+        controller.play_pause()
+        msg = await asyncio.wait_for(client.recv(), timeout=2.0)
+        assert msg == "playPause"
+
+    await manager.stop()
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_stop_timeout_during_bind_supervises_and_releases(
+    app_state: AppState,
+) -> None:
+    """R02 - Teste 5: Timeout do observador de stop durante bind garante intenção e cleanup."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    orig_serve = websockets.serve
+
+    bind_in_progress = asyncio.Event()
+    unblock_bind = asyncio.Event()
+
+    async def slow_serve(*args: Any, **kwargs: Any) -> Server:
+        bind_in_progress.set()
+        try:
+            await unblock_bind.wait()
+        except asyncio.CancelledError:
+            await unblock_bind.wait()
+            raise
+        return await orig_serve(*args, **kwargs)
+
+    websockets.serve = slow_serve  # type: ignore[assignment]
+    try:
+        start_task = asyncio.create_task(manager.start())
+        await bind_in_progress.wait()
+
+        # 5. Executar stop com timeout
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(manager.stop(), timeout=0.01)
+
+        # 7. Intenção de shutdown registrada
+        assert manager.is_shutting_down is True
+
+        # 8. Liberar a conclusão do bind
+        unblock_bind.set()
+
+        # 9. Aguardar a conclusão das operações supervisionadas
+        await start_task
+        if manager._shutdown_task is not None:
+            await manager._shutdown_task
+
+        # 10. Nenhum socket ativo e tarefas limpas
+        assert manager.is_running is False
+        assert manager.listening_port is None
+        assert manager.server is None
+
+    finally:
+        unblock_bind.set()
+        websockets.serve = orig_serve  # type: ignore[assignment]
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_stop_observer_cancellation_preserves_cleanup(
+    app_state: AppState,
+) -> None:
+    """R02 - Teste 6: Cancelamento do observador de stop não aborta cleanup em background."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    started = await manager.start()
+    assert started is True
+    assert manager.is_running is True
+
+    # Instrumenta cleanup para aguardar um evento
+    orig_stop = manager._server.stop if manager._server else None
+    assert orig_stop is not None
+
+    cleanup_started = asyncio.Event()
+    unblock_cleanup = asyncio.Event()
+
+    async def slow_stop() -> None:
+        cleanup_started.set()
+        await unblock_cleanup.wait()
+        await orig_stop()
+
+    manager._server.stop = slow_stop  # type: ignore[assignment]
+
+    try:
+        stop_task = asyncio.create_task(manager.stop())
+        await cleanup_started.wait()
+
+        # Cancela a tarefa observadora
+        stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        # Confirma que o gerenciador continua supervisionando o cleanup
+        assert manager.is_shutting_down is True
+        assert manager._shutdown_task is not None
+        assert not manager._shutdown_task.done()
+
+        # Libera o cleanup
+        unblock_cleanup.set()
+        await manager._shutdown_task
+
+        assert manager.is_running is False
+        assert manager.server is None
+
+    finally:
+        unblock_cleanup.set()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_repeated_stop_is_idempotent_and_safe(
+    app_state: AppState,
+) -> None:
+    """R02 - Teste 7: Chamadas repetidas e concorrentes a stop são idempotentes e seguras."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    await manager.start()
+    assert manager.is_running is True
+
+    # Dispara múltiplos stops simultaneamente
+    await asyncio.gather(
+        manager.stop(),
+        manager.stop(),
+        manager.stop(),
+    )
+
+    assert manager.is_running is False
+    assert manager.is_shutting_down is True
+
+    # Chamada subsequente quando já parado
+    await manager.stop()
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_start_cancellation_during_bind_supervises_task(
+    app_state: AppState,
+) -> None:
+    """R03 - Testes 8, 9: Cancelamento de start limpa tarefas e recupera."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    orig_serve = websockets.serve
+
+    bind_started = asyncio.Event()
+    unblock_bind = asyncio.Event()
+
+    async def slow_serve(*args: Any, **kwargs: Any) -> Server:
+        bind_started.set()
+        await unblock_bind.wait()
+        return await orig_serve(*args, **kwargs)
+
+    websockets.serve = slow_serve  # type: ignore[assignment]
+    try:
+        start_task = asyncio.create_task(manager.start())
+        await bind_started.wait()
+
+        # Tarefa servidora interna foi criada
+        assert manager._server_task is not None
+
+        # Cancela o start
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        # Libera o bind
+        unblock_bind.set()
+        await asyncio.sleep(0.05)
+
+        # Nenhum socket ativo e tarefas limpas
+        assert manager.is_running is False
+        assert manager.listening_port is None
+        assert manager.server is None
+
+    finally:
+        unblock_bind.set()
+        websockets.serve = orig_serve  # type: ignore[assignment]
+
+    # Teste 9: Recuperação após cancelamento
+    started = await manager.start()
+    assert started is True
+    assert manager.is_running is True
+    port = manager.listening_port
+    assert port is not None
+
+    async with connect(f"ws://127.0.0.1:{port}") as client:
+        manager.enqueue_command("recovered_cmd")
+        msg = await asyncio.wait_for(client.recv(), timeout=2.0)
+        assert msg == "recovered_cmd"
+
+    await manager.stop()
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_start_cancellation_during_bind_failure(
+    app_state: AppState,
+) -> None:
+    """R03 - Teste 10: Cancelamento durante erro de bind não deixa referências órfãs."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    orig_serve = websockets.serve
+
+    bind_started = asyncio.Event()
+    unblock_bind = asyncio.Event()
+
+    async def failing_slow_serve(*args: Any, **kwargs: Any) -> Server:
+        bind_started.set()
+        await unblock_bind.wait()
+        raise OSError("Falha simulada de bind")
+
+    websockets.serve = failing_slow_serve  # type: ignore[assignment]
+    try:
+        start_task = asyncio.create_task(manager.start())
+        await bind_started.wait()
+
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        unblock_bind.set()
+        await asyncio.sleep(0.05)
+
+        assert manager.is_running is False
+        assert manager.server is None
+        assert manager._server_task is None
+
+    finally:
+        unblock_bind.set()
+        websockets.serve = orig_serve  # type: ignore[assignment]
+
+    # Nova tentativa após o cancelamento funciona normalmente
+    started = await manager.start()
+    assert started is True
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_restart_during_shutdown_reports_failure_and_cleans(
+    app_state: AppState,
+) -> None:
+    """R04 - Testes 11, 12, 13: Restart durante e após shutdown retorna False e não abre sockets."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    await manager.start()
+    assert manager.is_running is True
+
+    orig_serve = websockets.serve
+    bind_b_started = asyncio.Event()
+    unblock_b = asyncio.Event()
+
+    async def slow_serve_b(*args: Any, **kwargs: Any) -> Server:
+        bind_b_started.set()
+        await unblock_b.wait()
+        return await orig_serve(*args, **kwargs)
+
+    # Teste 11: Shutdown durante bind do substituto B
+    s_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s_b.bind(("127.0.0.1", 0))
+    port_b = s_b.getsockname()[1]
+    s_b.close()
+    await asyncio.sleep(0.01)
+
+    websockets.serve = slow_serve_b  # type: ignore[assignment]
+    try:
+        restart_task = asyncio.create_task(manager.restart(port_b))
+        await bind_b_started.wait()
+
+        # Inicia shutdown global enquanto B está em bind
+        stop_task = asyncio.create_task(manager.stop())
+        await asyncio.sleep(0.01)
+        assert manager.is_shutting_down is True
+
+        # Libera bind de B
+        unblock_b.set()
+
+        res_restart = await restart_task
+        await stop_task
+
+        # Restart não pode retornar sucesso operacional
+        assert res_restart is False
+        assert manager.is_running is False
+        assert manager.listening_port is None
+
+        # Socket de B não deve estar aceitando conexões
+        with pytest.raises(OSError):
+            async with connect(f"ws://127.0.0.1:{port_b}"):
+                pass
+
+    finally:
+        unblock_b.set()
+        websockets.serve = orig_serve  # type: ignore[assignment]
+
+    # Teste 13: Reinício solicitado depois do shutdown
+    s_d = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s_d.bind(("127.0.0.1", 0))
+    port_d = s_d.getsockname()[1]
+    s_d.close()
+
+    res_d = await manager.restart(port_d)
+    assert res_d is False
+    assert manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_concurrent_restarts_during_shutdown(
+    app_state: AppState,
+) -> None:
+    """R04 - Teste 12: Múltiplos reinícios pendentes abortam quando shutdown ocorre."""
+    manager = WebSocketManager(app_state, initial_port=0)
+    await manager.start()
+
+    s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s1.bind(("127.0.0.1", 0))
+    p1 = s1.getsockname()[1]
+    s1.close()
+
+    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s2.bind(("127.0.0.1", 0))
+    p2 = s2.getsockname()[1]
+    s2.close()
+
+    # Dispara dois restarts e um stop simultaneamente
+    r1, r2, _ = await asyncio.gather(
+        manager.restart(p1),
+        manager.restart(p2),
+        manager.stop(),
+    )
+
+    # Ambos os restarts não podem prevalecer sobre o stop
+    assert r1 is False or r2 is False
+    assert manager.is_running is False
+    assert manager.server is None

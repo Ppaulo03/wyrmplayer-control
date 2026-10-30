@@ -70,7 +70,6 @@ async def app_main(page: ft.Page) -> None:
     # 1. Inicializa o gerenciador WebSocket e controlador do player
     ws_manager = WebSocketManager(state, runtime_cfg.websocket_port)
     controller = PlayerController(state, cfg_manager, ws_manager, loop=loop)
-    ws_manager.controller = controller
 
     # 3. Configura o gerenciador de atalhos globais
     hotkeys = HotkeyManager(controller, cfg_manager)
