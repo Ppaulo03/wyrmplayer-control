@@ -32,6 +32,7 @@ class MusicWebSocketServer:
         self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
         self._is_starting: bool = False
         self._is_stopping: bool = False
+        self._active_cycle_id: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -53,6 +54,24 @@ class MusicWebSocketServer:
     async def start(self) -> None:
         """Inicia o servidor e o loop de broadcast de forma sincronizada e exclusiva."""
         async with self._lifecycle_lock:
+            if self.is_running:
+                logger.warning(
+                    "Servidor WebSocket já está ativo ou inicializando em ws://%s:%s",
+                    self.host,
+                    self.port,
+                )
+                return
+
+            # Aguarda a conclusão definitiva de ciclo anterior que ainda esteja em cleanup
+            if self._serving_task is not None and self._serving_task is not asyncio.current_task():
+                if not self._serving_task.done():
+                    try:
+                        await self._serving_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._serving_task = None
+
+            # Checagem de concorrência após espera de ciclo anterior
             if self.is_running or self._is_starting:
                 logger.warning(
                     "Servidor WebSocket já está ativo ou inicializando em ws://%s:%s",
@@ -63,41 +82,85 @@ class MusicWebSocketServer:
 
             self._is_starting = True
             self._loop = asyncio.get_running_loop()
-            self._stop_event = asyncio.Event()
-            self._serving_task = asyncio.current_task()
+            stop_event = asyncio.Event()
+            self._stop_event = stop_event
+            current_task = asyncio.current_task()
+            self._serving_task = current_task
+
+            self._active_cycle_id += 1
+            cycle_id = self._active_cycle_id
+            cycle_clients: set[ServerConnection] = set()
+
+            async def cycle_connection_handler(websocket: ServerConnection) -> None:
+                cycle_clients.add(websocket)
+                try:
+                    await self.handler(websocket)
+                finally:
+                    cycle_clients.discard(websocket)
 
             server: Server | None = None
             try:
-                server = await websockets.serve(self.handler, self.host, self.port)
+                server = await websockets.serve(cycle_connection_handler, self.host, self.port)
+            except asyncio.CancelledError:
+                self._is_starting = False
+                if self._serving_task is current_task:
+                    self._serving_task = None
+                if self._stop_event is stop_event:
+                    self._stop_event = None
+                if server is not None:
+                    await self._cleanup_cycle(
+                        server=server,
+                        broadcast_task=None,
+                        stop_event=stop_event,
+                        cycle_clients=cycle_clients,
+                        cycle_id=cycle_id,
+                        serving_task=current_task,
+                    )
+                raise
             except Exception as e:
                 logger.error(
                     "Falha ao abrir servidor WebSocket em %s:%s: %s", self.host, self.port, e
                 )
                 self._is_starting = False
-                self._serving_task = None
-                self._stop_event = None
+                if self._serving_task is current_task:
+                    self._serving_task = None
+                if self._stop_event is stop_event:
+                    self._stop_event = None
+                if server is not None:
+                    await self._cleanup_cycle(
+                        server=server,
+                        broadcast_task=None,
+                        stop_event=stop_event,
+                        cycle_clients=cycle_clients,
+                        cycle_id=cycle_id,
+                        serving_task=current_task,
+                    )
                 raise
 
             self._server = server
             self._is_starting = False
             actual_port = self.listening_port or self.port
             logger.info("Servidor WebSocket ouvindo em ws://%s:%s", self.host, actual_port)
-            self._broadcast_task = asyncio.create_task(self._broadcast_loop())
+            broadcast_task = asyncio.create_task(self._broadcast_loop())
+            self._broadcast_task = broadcast_task
 
         # Execução fora do lock: aguarda sinal de parada
-        stop_event = self._stop_event
         try:
-            if stop_event is not None:
-                await stop_event.wait()
-        except asyncio.CancelledError:
-            pass
+            await stop_event.wait()
         finally:
-            await self._cleanup_cycle(server)
+            await self._cleanup_cycle(
+                server=server,
+                broadcast_task=broadcast_task,
+                stop_event=stop_event,
+                cycle_clients=cycle_clients,
+                cycle_id=cycle_id,
+                serving_task=current_task,
+            )
 
     async def stop(self) -> None:
         """Encerra o servidor WebSocket e desconecta clientes de forma coordenada e idempotente."""
         async with self._lifecycle_lock:
-            if not self.is_running and not self._is_starting:
+            if not self.is_running and not self._is_starting and self._serving_task is None:
                 return
 
             self._is_stopping = True
@@ -107,62 +170,95 @@ class MusicWebSocketServer:
                 self._stop_event.set()
 
             # Aguarda a tarefa do servidor concluir sua execução e cleanup
-            if self._serving_task is not None and self._serving_task is not asyncio.current_task():
-                if not self._serving_task.done():
+            serving_task = self._serving_task
+            if serving_task is not None and serving_task is not asyncio.current_task():
+                if not serving_task.done():
                     try:
-                        await self._serving_task
+                        await serving_task
                     except asyncio.CancelledError:
                         pass
-                self._serving_task = None
+                if self._serving_task is serving_task:
+                    self._serving_task = None
             else:
                 # Se stop foi chamado de dentro da própria serving_task ou sem serving_task
                 if self._server is not None:
-                    await self._cleanup_cycle(self._server)
+                    await self._cleanup_cycle(
+                        server=self._server,
+                        broadcast_task=self._broadcast_task,
+                        stop_event=self._stop_event,
+                        cycle_clients=set(self.clients),
+                        cycle_id=self._active_cycle_id,
+                        serving_task=self._serving_task,
+                    )
 
             self._is_stopping = False
 
-    async def _cleanup_cycle(self, server: Server | None) -> None:
-        """Limpa recursos pertencentes estritamente ao servidor deste ciclo."""
-        # Finaliza a tarefa de broadcast
-        if self._broadcast_task and not self._broadcast_task.done():
-            self._broadcast_task.cancel()
+    async def _cleanup_cycle(
+        self,
+        server: Server | None,
+        broadcast_task: asyncio.Task[None] | None,
+        stop_event: asyncio.Event | None,
+        cycle_clients: set[ServerConnection],
+        cycle_id: int,
+        serving_task: asyncio.Task[None] | None,
+    ) -> None:
+        """Limpa recursos pertencentes estritamente a este ciclo."""
+        # 1. Finaliza a tarefa de broadcast deste ciclo
+        task_to_cancel = broadcast_task
+        if self._active_cycle_id == cycle_id and self._broadcast_task is not None:
+            task_to_cancel = self._broadcast_task
+
+        if task_to_cancel and not task_to_cancel.done():
+            task_to_cancel.cancel()
             try:
-                await self._broadcast_task
+                await task_to_cancel
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
                 logger.warning("Erro ao aguardar encerramento do broadcast: %s", exc)
-        self._broadcast_task = None
+        if self._broadcast_task is task_to_cancel or self._broadcast_task is broadcast_task:
+            self._broadcast_task = None
 
-        # Fecha o socket do websockets.Server
+        # 2. Fecha o socket do websockets.Server deste ciclo
         if server is not None:
             try:
                 server.close()
                 await server.wait_closed()
+            except asyncio.CancelledError:
+                try:
+                    await server.wait_closed()
+                except (asyncio.CancelledError, Exception):
+                    pass
             except Exception as e:
                 logger.warning("Exceção ao fechar websockets.Server: %s", e)
 
-        # Desconecta clientes
-        if self.clients:
-            for client in list(self.clients):
+        # 3. Desconecta clientes pertencentes a este ciclo
+        if cycle_clients:
+            for client in list(cycle_clients):
                 try:
                     await client.close(1001, "Servidor encerrando")
-                except Exception:
+                except (asyncio.CancelledError, Exception):
                     pass
-            self.clients.clear()
-        self.state.active_connections = 0
+                self.clients.discard(client)
+            cycle_clients.clear()
+        self.state.active_connections = len(self.clients)
 
-        # Limpa referências internas somente se pertencerem a este ciclo
+        # 4. Limpa referências internas se ainda pertencerem a este ciclo
         if self._server is server:
             self._server = None
+        if self._stop_event is stop_event:
+            self._stop_event = None
+        if self._serving_task is serving_task:
+            self._serving_task = None
 
-        # Drena comandos residuais
-        while not self.command_queue.empty():
-            try:
-                self.command_queue.get_nowait()
-                self.command_queue.task_done()
-            except (asyncio.QueueEmpty, ValueError):
-                break
+        # 5. Drena comandos residuais se ainda for o ciclo ativo
+        if self._active_cycle_id == cycle_id:
+            while not self.command_queue.empty():
+                try:
+                    self.command_queue.get_nowait()
+                    self.command_queue.task_done()
+                except (asyncio.QueueEmpty, ValueError):
+                    break
 
     async def handler(self, websocket: ServerConnection) -> None:
         """Handler para conexões de entrada (Protocolo de Texto Simples)."""
